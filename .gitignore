@@ -1,0 +1,34 @@
+# 二进制文件
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试二进制文件
+*.test
+
+# 输出文件
+*.out
+
+# 依赖目录
+/vendor/
+
+# IDE文件
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 日志文件
+*.log
+
+# Go工作区文件
+go.work
+
+# PioSolver特有文件
+*.cfr
+
+# 临时文件
+/tmp/
+/temp/ 
