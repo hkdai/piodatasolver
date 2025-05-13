@@ -90,7 +90,7 @@ func (c *Client) ExecuteCommand(command string, timeout time.Duration) ([]string
 	}
 
 	// 发送命令
-	fmt.Printf("\n--- 发送指令: %s ---\n", command)
+
 	if _, err := fmt.Fprintln(c.stdin, command); err != nil {
 		return nil, fmt.Errorf("发送命令失败: %v", err)
 	}
@@ -129,7 +129,7 @@ func (c *Client) readResponseUntilEnd(timeout time.Duration) ([]string, error) {
 			line = strings.TrimSuffix(line, "\r")
 
 			// 打印响应行
-			fmt.Printf("收到响应: %s\n", line)
+			// fmt.Printf("收到响应: %s\n", line)
 
 			// 检查是否是结束标记
 			if line == c.endString {
