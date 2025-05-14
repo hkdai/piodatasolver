@@ -6,6 +6,7 @@ type Action struct {
 	Freq        float64 `json:"freq"`        //0.00-1.00
 	Ev          float64 `json:"ev"`          //expected value
 	Eq          float64 `json:"eq"`          //equity
+	Matchup     float64 `json:"matchup"`     //match-up
 }
 
 // ChildNode 表示一个子节点的信息

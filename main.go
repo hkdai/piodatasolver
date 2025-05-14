@@ -344,6 +344,10 @@ func parseNode(client *upi.Client, node string) {
 				}
 			}
 
+			//ev_lines的第二行包含所有手牌的match-up值
+			matchup_line := ev_lines[1]
+			matchup_split := strings.Fields(matchup_line)
+
 			// 如果找到了目标手牌的位置，打印其原始EV值
 			if targetIdx >= 0 && targetIdx < len(ev_split) {
 				rawEV := ev_split[targetIdx]
@@ -363,6 +367,13 @@ func parseNode(client *upi.Client, node string) {
 					continue
 				}
 
+				// 解析match-up值
+				matchup, err := strconv.ParseFloat(matchup_split[j], 64)
+				if err != nil || strings.Contains(strings.ToLower(matchup_split[j]), "nan") {
+					// 跳过解析失败或NaN的值
+					continue
+				}
+
 				// 在手牌的记录中查找对应的action并更新EV
 				record := handRecords[hand]
 				if record == nil {
@@ -374,6 +385,7 @@ func parseNode(client *upi.Client, node string) {
 					// 确认是否为同一个action（通过比较ChildNodeID或其他唯一标识）
 					if record.Actions[k].ChildNodeID == childNodeID {
 						record.Actions[k].Ev = ev
+						record.Actions[k].Matchup = matchup
 
 						// 调试目标手牌
 						if hand == targetHand {
@@ -464,11 +476,20 @@ func parseNode(client *upi.Client, node string) {
 			evIsInvalid := action.Ev == 0 || math.IsInf(action.Ev, 0) || math.IsNaN(action.Ev)
 			eqIsInvalid := action.Eq == 0 || math.IsInf(action.Eq, 0) || math.IsNaN(action.Eq)
 
-			// 只有当三个值都无效时才过滤
-			if freqIsInvalid && evIsInvalid && eqIsInvalid {
+			// 检查ev*matchup是否等于0且不是fold动作
+			evMultMatchupIsZero := action.Ev*action.Matchup == 0 && action.Label != "fold"
+
+			// 只有当所有三个值都无效时或者ev*matchup=0（非fold）时才过滤
+			if (freqIsInvalid && evIsInvalid && eqIsInvalid) || evMultMatchupIsZero {
 				if hand == targetHand {
-					log.Printf("过滤掉手牌 %s 的全无效动作: freq=%.6f, ev=%.2f, eq=%.6f",
-						targetHand, action.Freq, action.Ev, action.Eq)
+					var reason string
+					if evMultMatchupIsZero {
+						reason = "ev*matchup=0且非fold动作"
+					} else {
+						reason = "所有值都无效"
+					}
+					log.Printf("过滤掉手牌 %s 的无效动作: %s, freq=%.6f, ev=%.2f, eq=%.6f, matchup=%.6f, 原因: %s",
+						targetHand, action.Label, action.Freq, action.Ev, action.Eq, action.Matchup, reason)
 				}
 				filteredActionCount++ // 增加过滤计数
 				continue
@@ -480,8 +501,16 @@ func parseNode(client *upi.Client, node string) {
 		// 更新record的Actions
 		record.Actions = validActions
 
-		// 只有当有有效Action时，才添加到finalRecords
+		// 只有当有有效Action时才添加到finalRecords
+		// 新增条件：如果只有一个action且为fold，也过滤掉
 		if len(record.Actions) > 0 {
+			// 过滤掉只有一个fold动作的record
+			if len(record.Actions) == 1 && record.Actions[0].Label == "fold" {
+				if hand == targetHand {
+					log.Printf("过滤掉手牌 %s 的只有fold动作的记录", targetHand)
+				}
+				continue
+			}
 			finalRecords = append(finalRecords, record)
 		}
 	}
@@ -1031,9 +1060,17 @@ func printTargetHandRawData(client *upi.Client, node string) {
 			evIsInvalid := ev == 0 || math.IsInf(ev, 0) || strings.Contains(strings.ToLower(evStr), "nan") || strings.Contains(strings.ToLower(evStr), "inf")
 			eqIsInvalid := eq == 0 || math.IsInf(eq, 0) || strings.Contains(strings.ToLower(eqStr), "nan") || strings.Contains(strings.ToLower(eqStr), "inf")
 
-			// 只有当三个值都无效时才标记为将被过滤
-			if freqIsInvalid && evIsInvalid && eqIsInvalid {
-				filterReason = "[将被过滤: 所有值都无效]"
+			// 检查ev*matchup是否等于0且不是fold动作
+			// 注意: 在这个展示函数中，我们没有直接访问 matchup 数据，暂时使用 eq 作为近似
+			evMultMatchupIsZero := ev*eq == 0 && childLabels[i] != "fold"
+
+			// 只有当三个值都无效时或ev*matchup=0（非fold）时才标记为将被过滤
+			if (freqIsInvalid && evIsInvalid && eqIsInvalid) || evMultMatchupIsZero {
+				if evMultMatchupIsZero {
+					filterReason = "[将被过滤: ev*matchup=0且非fold动作]"
+				} else {
+					filterReason = "[将被过滤: 所有值都无效]"
+				}
 			}
 
 			if filterReason != "" {
