@@ -31,4 +31,9 @@ go.work
 
 # 临时文件
 /tmp/
-/temp/ 
+/temp/
+
+# 忽略data目录下的所有JSON文件
+data/*.json
+# 但不忽略hand_mapping.json
+!data/hand_mapping.json 

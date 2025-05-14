@@ -22,9 +22,6 @@ var handOrder *cache.HandOrder
 // CFR文件路径 - 用于生成输出文件名
 var cfrFilePath string
 
-// 目标手牌，用于调试
-var targetHand = "5h4d"
-
 // 全局变量，用于统计过滤的动作数量
 var (
 	filteredActionCount int = 0
@@ -130,16 +127,9 @@ func parseNode(client *upi.Client, node string) {
 		return
 	}
 
-	for _, resp := range responses {
-		log.Printf("执行指令响应: %s", resp)
-	}
-
 	actor := responses[1]
 	board := responses[2]
 	pot := responses[3]
-
-	// 调试信息：当前节点的基本信息
-	log.Printf("调试[%s]：节点=%s, 行动方=%s, 公牌=%s, 底池=%s", targetHand, node, actor, board, pot)
 
 	// 检查是否为终端节点（无子节点）
 	childrenCount := "0"
@@ -280,11 +270,6 @@ func parseNode(client *upi.Client, node string) {
 				action.Freq = freq
 				action.ChildNodeID = children[i].NodeID
 
-				// 记录添加了频率为0的动作
-				if freq == 0 {
-					log.Printf("添加频率为0的%s动作到手牌 %s", action.Label, hand)
-				}
-
 				// 添加到对应手牌的Record中
 				record := handRecords[hand]
 				record.Actions = append(record.Actions, action)
@@ -335,24 +320,9 @@ func parseNode(client *upi.Client, node string) {
 			ev_line := ev_lines[0] // 使用第0行
 			ev_split := strings.Fields(ev_line)
 
-			// 获取目标手牌在手牌列表中的索引位置
-			targetIdx := -1
-			for j, hand := range handCards {
-				if hand == targetHand {
-					targetIdx = j
-					break
-				}
-			}
-
 			//ev_lines的第二行包含所有手牌的match-up值
 			matchup_line := ev_lines[1]
 			matchup_split := strings.Fields(matchup_line)
-
-			// 如果找到了目标手牌的位置，打印其原始EV值
-			if targetIdx >= 0 && targetIdx < len(ev_split) {
-				rawEV := ev_split[targetIdx]
-				log.Printf("调试[%s]：动作=%s, 原始EV值=%s", targetHand, action.Label, rawEV)
-			}
 
 			// 遍历所有手牌，添加EV值到对应的Action中
 			for j, hand := range handCards {
@@ -386,11 +356,6 @@ func parseNode(client *upi.Client, node string) {
 					if record.Actions[k].ChildNodeID == childNodeID {
 						record.Actions[k].Ev = ev
 						record.Actions[k].Matchup = matchup
-
-						// 调试目标手牌
-						if hand == targetHand {
-							log.Printf("调试[%s]：节点=%s, 动作=%s, 更新EV值=%.2f", targetHand, node, action.Label, ev)
-						}
 						break
 					}
 				}
@@ -399,7 +364,7 @@ func parseNode(client *upi.Client, node string) {
 
 		//calc_eq_node 计算当前节点下1326手牌的胜率，只取第一行的eq值
 		cmd = fmt.Sprintf("calc_eq_node %s %s", actorCmd, node)
-		log.Printf("调试[%s]：执行命令 %s", targetHand, cmd)
+
 		eq_lines, err := client.ExecuteCommand(cmd, 10*time.Second)
 		if err != nil {
 			log.Printf("执行指令calc_eq_node失败: %v，跳过EQ处理", err)
@@ -409,21 +374,6 @@ func parseNode(client *upi.Client, node string) {
 			//只读取第一行的数据
 			eq_line := eq_lines[0]
 			eq_split := strings.Fields(eq_line)
-
-			// 获取目标手牌在手牌列表中的索引位置
-			targetIdx := -1
-			for j, hand := range handCards {
-				if hand == targetHand {
-					targetIdx = j
-					break
-				}
-			}
-
-			// 如果找到了目标手牌的位置，打印其原始EQ值
-			if targetIdx >= 0 && targetIdx < len(eq_split) {
-				rawEQ := eq_split[targetIdx]
-				log.Printf("调试[%s]：原始EQ值=%s", targetHand, rawEQ)
-			}
 
 			// 按照handCards顺序为每个手牌设置EQ值
 			for j, hand := range handCards {
@@ -450,11 +400,6 @@ func parseNode(client *upi.Client, node string) {
 				// 为所有action设置相同的EQ值
 				for k := range record.Actions {
 					record.Actions[k].Eq = eq
-
-					// 调试目标手牌
-					if hand == targetHand {
-						log.Printf("调试[%s]：节点=%s, 动作=%s, 更新EQ值=%.4f", targetHand, node, record.Actions[k].Label, eq)
-					}
 				}
 			}
 		}
@@ -481,16 +426,6 @@ func parseNode(client *upi.Client, node string) {
 
 			// 只有当所有三个值都无效时或者ev*matchup=0（非fold）时才过滤
 			if (freqIsInvalid && evIsInvalid && eqIsInvalid) || evMultMatchupIsZero {
-				if hand == targetHand {
-					var reason string
-					if evMultMatchupIsZero {
-						reason = "ev*matchup=0且非fold动作"
-					} else {
-						reason = "所有值都无效"
-					}
-					log.Printf("过滤掉手牌 %s 的无效动作: %s, freq=%.6f, ev=%.2f, eq=%.6f, matchup=%.6f, 原因: %s",
-						targetHand, action.Label, action.Freq, action.Ev, action.Eq, action.Matchup, reason)
-				}
 				filteredActionCount++ // 增加过滤计数
 				continue
 			}
@@ -506,9 +441,6 @@ func parseNode(client *upi.Client, node string) {
 		if len(record.Actions) > 0 {
 			// 过滤掉只有一个fold动作的record
 			if len(record.Actions) == 1 && record.Actions[0].Label == "fold" {
-				if hand == targetHand {
-					log.Printf("过滤掉手牌 %s 的只有fold动作的记录", targetHand)
-				}
 				continue
 			}
 			finalRecords = append(finalRecords, record)
@@ -593,51 +525,6 @@ func parseNode(client *upi.Client, node string) {
 		}
 	}
 
-	// 打印前20条记录作为示例
-	recordLimit := 20
-	if len(finalRecords) < recordLimit {
-		recordLimit = len(finalRecords)
-	}
-
-	log.Printf("共有记录 %d 条，前 %d 条如下:", len(finalRecords), recordLimit)
-	for i := 0; i < recordLimit; i++ {
-		record := finalRecords[i]
-		// 专门详细打印目标手牌的完整记录
-		if record.Hand == targetHand {
-			log.Printf("===== 目标手牌 %s 完整记录 =====", targetHand)
-			log.Printf("节点: %s", record.Node)
-			log.Printf("行动方: %s", record.Actor)
-			log.Printf("公牌: %s", record.Board)
-			log.Printf("动作数量: %d（已过滤全0动作）", len(record.Actions))
-
-			for j, action := range record.Actions {
-				log.Printf("  动作 #%d:", j+1)
-				log.Printf("    标签: %s", action.Label)
-				log.Printf("    频率: %.4f", action.Freq)
-				log.Printf("    期望值: %.2f", action.Ev)
-				log.Printf("    胜率: %.4f", action.Eq)
-				log.Printf("    子节点ID: %s", action.ChildNodeID)
-			}
-			log.Println("==============================")
-		}
-
-		log.Printf("=== 记录 #%d ===", i+1)
-		log.Printf("节点: %s", record.Node)
-		log.Printf("行动方: %s", record.Actor)
-		log.Printf("公牌: %s", record.Board)
-		log.Printf("手牌: %s", record.Hand)
-		log.Printf("动作数量: %d", len(record.Actions))
-
-		for j, action := range record.Actions {
-			log.Printf("  动作 #%d:", j+1)
-			log.Printf("    标签: %s", action.Label)
-			log.Printf("    频率: %.4f", action.Freq)
-			log.Printf("    期望值: %.2f", action.Ev)
-			log.Printf("    胜率: %.4f", action.Eq)
-		}
-		log.Println()
-	}
-
 	//遍历子节点，递归调用解析，但是当子节点的类型为SPLIT_NODE时，不再递归调用
 	for _, child := range children {
 		if child.NodeType != "SPLIT_NODE" {
@@ -651,437 +538,4 @@ func parseNode(client *upi.Client, node string) {
 		// 打印总结信息
 		log.Printf("处理完成根节点 %s，数据已保存到文件中", node)
 	}
-}
-
-// 直接查询目标手牌的EV值
-func directQueryTargetHand(client *upi.Client, node string) {
-	log.Printf("======= 开始直接查询手牌 %s 的EV值 =======", targetHand)
-
-	// 获取节点信息
-	cmd := fmt.Sprintf("show_node %s", node)
-	responses, err := client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil || len(responses) < 4 {
-		log.Printf("获取节点信息失败: %v", err)
-		return
-	}
-
-	actor := responses[1]
-	var actorCmd string
-	if actor == "IP_DEC" {
-		actorCmd = "IP"
-	} else if actor == "OOP_DEC" {
-		actorCmd = "OOP"
-	} else {
-		log.Printf("未知的行动方: %s", actor)
-		return
-	}
-
-	// 获取子节点
-	cmd = fmt.Sprintf("show_children %s", node)
-	responses, err = client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil {
-		log.Printf("获取子节点失败: %v", err)
-		return
-	}
-
-	// 存储子节点ID
-	var childNodeIDs []string
-	for i := 0; i < len(responses); i += 7 {
-		if i+1 < len(responses) {
-			childNodeIDs = append(childNodeIDs, responses[i+1])
-		}
-	}
-
-	// 找出目标手牌在手牌列表中的索引
-	targetIdx := -1
-	handCards := handOrder.Order()
-	for i, card := range handCards {
-		if card == targetHand {
-			targetIdx = i
-			break
-		}
-	}
-
-	if targetIdx == -1 {
-		log.Printf("未找到手牌 %s 在HandOrder中的位置", targetHand)
-		return
-	}
-
-	// 使用get_range_ev命令，该命令返回一个手牌在特定节点的期望值
-	cmd = fmt.Sprintf("get_range_ev %s %s %s", actorCmd, node, targetHand)
-	log.Printf("执行命令: %s", cmd)
-	responses, err = client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil || len(responses) == 0 {
-		log.Printf("直接查询EV失败: %v", err)
-		return
-	}
-
-	log.Printf("直接查询手牌 %s 的EV值结果: %v", targetHand, responses)
-
-	// 使用calc_individual_ev命令查询AhAd手牌的具体EV值
-	cmd = fmt.Sprintf("calc_individual_ev %s", targetHand)
-	log.Printf("执行命令: %s", cmd)
-	responses, err = client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil {
-		log.Printf("使用calc_individual_ev查询失败: %v", err)
-	} else {
-		log.Printf("calc_individual_ev结果: %v", responses)
-	}
-
-	// 对每个子节点尝试计算手牌的EV值
-	for _, childNodeID := range childNodeIDs {
-		// 先获取子节点对应的动作类型(call/fold)
-		label := "未知"
-		if strings.HasSuffix(childNodeID, ":c") {
-			label = "call"
-		} else if strings.HasSuffix(childNodeID, ":f") {
-			label = "fold"
-		}
-
-		// 使用calc_ev命令查询特定子节点的EV值
-		cmd = fmt.Sprintf("calc_ev %s %s", actorCmd, childNodeID)
-		log.Printf("对子节点 %s (动作: %s) 执行命令: %s", childNodeID, label, cmd)
-		responses, err = client.ExecuteCommand(cmd, 10*time.Second)
-		if err != nil {
-			log.Printf("查询子节点EV失败: %v", err)
-			continue
-		}
-
-		// 从EVs中提取目标手牌的值
-		if len(responses) > 0 {
-			evs := strings.Fields(responses[0])
-			if targetIdx < len(evs) {
-				ev := evs[targetIdx]
-				log.Printf("手牌 %s 在子节点 %s (动作: %s) 的EV值: %s", targetHand, childNodeID, label, ev)
-
-				// 尝试使用calc_individual_ev_at_node命令（如果PioSOLVER支持）
-				cmd = fmt.Sprintf("calc_individual_ev_at_node %s %s %s", actorCmd, childNodeID, targetHand)
-				log.Printf("尝试命令: %s", cmd)
-				indivResponses, err := client.ExecuteCommand(cmd, 10*time.Second)
-				if err != nil {
-					log.Printf("尝试calc_individual_ev_at_node失败: %v", err)
-				} else {
-					log.Printf("手牌 %s 在子节点 %s 使用calc_individual_ev_at_node的结果: %v",
-						targetHand, childNodeID, indivResponses)
-				}
-			}
-		}
-	}
-
-	// 尝试直接使用show_strategy_line查询特定手牌的策略
-	cmd = fmt.Sprintf("show_strategy_line %s %s", node, targetHand)
-	log.Printf("执行命令: %s", cmd)
-	responses, err = client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil {
-		log.Printf("使用show_strategy_line查询失败: %v", err)
-	} else {
-		log.Printf("show_strategy_line结果: %v", responses)
-	}
-
-	// 尝试手动计算EV
-	log.Printf("开始手动计算手牌 %s 的EV值...", targetHand)
-	var weightedEv float64
-	var totalFreq float64
-
-	// 获取策略频率
-	cmd = fmt.Sprintf("show_strategy %s", node)
-	strategyResp, err := client.ExecuteCommand(cmd, 10*time.Second)
-	if err == nil && len(strategyResp) >= len(childNodeIDs) {
-		for i, childID := range childNodeIDs {
-			if i < len(strategyResp) {
-				strats := strings.Fields(strategyResp[i])
-				if targetIdx < len(strats) {
-					freq, err := strconv.ParseFloat(strats[targetIdx], 64)
-					if err == nil {
-						// 获取该动作下的EV
-						cmd = fmt.Sprintf("calc_ev %s %s", actorCmd, childID)
-						evResp, err := client.ExecuteCommand(cmd, 10*time.Second)
-						if err == nil && len(evResp) > 0 {
-							evs := strings.Fields(evResp[0])
-							if targetIdx < len(evs) {
-								ev, err := strconv.ParseFloat(evs[targetIdx], 64)
-								if err == nil {
-									log.Printf("动作 %s: 频率 = %.4f, EV = %.2f", childID, freq, ev)
-									weightedEv += freq * ev
-									totalFreq += freq
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		if totalFreq > 0 {
-			finalEv := weightedEv / totalFreq
-			log.Printf("手牌 %s 的手动计算EV值 = %.2f (总频率 = %.4f)", targetHand, finalEv, totalFreq)
-		}
-	}
-
-	log.Printf("======= 完成直接查询 =======")
-}
-
-// 打印目标手牌的原始UPI数据
-func printTargetHandRawData(client *upi.Client, node string) {
-	fmt.Printf("\n======== 打印手牌 %s 的原始UPI数据 ========\n\n", targetHand)
-
-	// 1. 获取节点信息
-	cmd := fmt.Sprintf("show_node %s", node)
-	responses, err := client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil || len(responses) < 4 {
-		log.Fatalf("获取节点信息失败: %v", err)
-	}
-
-	fmt.Println("【节点信息】")
-	for _, resp := range responses {
-		fmt.Println(resp)
-	}
-	fmt.Println()
-
-	// 确定行动方
-	actor := responses[1]
-	var actorCmd string
-	if actor == "IP_DEC" {
-		actorCmd = "IP"
-	} else if actor == "OOP_DEC" {
-		actorCmd = "OOP"
-	} else {
-		log.Fatalf("未知的行动方: %s", actor)
-	}
-
-	// 2. 获取子节点信息
-	cmd = fmt.Sprintf("show_children %s", node)
-	childResponses, err := client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil {
-		log.Fatalf("获取子节点失败: %v", err)
-	}
-
-	fmt.Println("【子节点信息】")
-	for _, resp := range childResponses {
-		fmt.Println(resp)
-	}
-	fmt.Println()
-
-	// 解析出子节点ID
-	var childNodeIDs []string
-	var childLabels []string
-	for i := 0; i < len(childResponses); i += 7 {
-		if i+1 < len(childResponses) {
-			nodeID := childResponses[i+1]
-			// 提取动作标签
-			var label string
-			if strings.HasSuffix(nodeID, ":c") {
-				label = "call"
-			} else if strings.HasSuffix(nodeID, ":f") {
-				label = "fold"
-			} else if strings.HasSuffix(nodeID, ":k") {
-				label = "check"
-			} else if strings.Contains(nodeID, ":b") {
-				label = "bet/raise"
-			} else {
-				label = "未知"
-			}
-
-			childNodeIDs = append(childNodeIDs, nodeID)
-			childLabels = append(childLabels, label)
-		}
-	}
-
-	// 3. 获取策略频率
-	cmd = fmt.Sprintf("show_strategy %s", node)
-	strategyResp, err := client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil {
-		log.Fatalf("获取策略频率失败: %v", err)
-	}
-
-	// 找出目标手牌在手牌列表中的索引
-	targetIdx := -1
-	handCards := handOrder.Order()
-	for i, card := range handCards {
-		if card == targetHand {
-			targetIdx = i
-			break
-		}
-	}
-
-	if targetIdx == -1 {
-		log.Fatalf("未找到手牌 %s 在HandOrder中的位置", targetHand)
-	}
-
-	fmt.Println("【策略频率原始数据】")
-	for i, resp := range strategyResp {
-		if i < len(childLabels) {
-			fmt.Printf("动作 %s (%s):\n%s\n", childNodeIDs[i], childLabels[i], resp)
-		}
-	}
-	fmt.Println()
-
-	// 提取目标手牌的频率数据
-	fmt.Println("【目标手牌策略频率】")
-	for i, resp := range strategyResp {
-		if i < len(childLabels) && i < len(childNodeIDs) {
-			fields := strings.Fields(resp)
-			if targetIdx < len(fields) {
-				freq, err := strconv.ParseFloat(fields[targetIdx], 64)
-				if err != nil {
-					fmt.Printf("动作 %s (%s): 无法解析频率\n", childNodeIDs[i], childLabels[i])
-				} else {
-					fmt.Printf("动作 %s (%s): 频率 = %.6f\n", childNodeIDs[i], childLabels[i], freq)
-				}
-			} else {
-				fmt.Printf("动作 %s (%s): 索引超出范围\n", childNodeIDs[i], childLabels[i])
-			}
-		}
-	}
-	fmt.Println()
-
-	// 4. 获取当前节点的EQ值
-	cmd = fmt.Sprintf("calc_eq_node %s %s", actorCmd, node)
-	eqResp, err := client.ExecuteCommand(cmd, 10*time.Second)
-	if err != nil {
-		log.Fatalf("获取EQ值失败: %v", err)
-	}
-
-	fmt.Println("【EQ原始数据】")
-	for _, resp := range eqResp {
-		fmt.Println(resp)
-	}
-	fmt.Println()
-
-	// 提取目标手牌的EQ值
-	if len(eqResp) > 0 {
-		fields := strings.Fields(eqResp[0])
-		if targetIdx < len(fields) {
-			eq, err := strconv.ParseFloat(fields[targetIdx], 64)
-			if err != nil {
-				fmt.Printf("手牌 %s: EQ = 无法解析\n", targetHand)
-			} else {
-				fmt.Printf("手牌 %s: EQ = %.6f\n", targetHand, eq)
-			}
-		} else {
-			fmt.Printf("手牌 %s: EQ索引超出范围\n", targetHand)
-		}
-	}
-	fmt.Println()
-
-	// 5. 获取各个子节点的EV值
-	fmt.Println("【各动作EV原始数据】")
-	for i, childID := range childNodeIDs {
-		if i < len(childLabels) {
-			cmd = fmt.Sprintf("calc_ev %s %s", actorCmd, childID)
-			evResp, err := client.ExecuteCommand(cmd, 10*time.Second)
-			if err != nil {
-				fmt.Printf("获取动作 %s (%s) 的EV值失败: %v\n", childID, childLabels[i], err)
-				continue
-			}
-
-			fmt.Printf("动作 %s (%s):\n", childID, childLabels[i])
-			for _, resp := range evResp {
-				fmt.Println(resp)
-			}
-			fmt.Println()
-
-			// 提取目标手牌的EV值
-			if len(evResp) > 0 {
-				fields := strings.Fields(evResp[0])
-				if targetIdx < len(fields) {
-					ev, err := strconv.ParseFloat(fields[targetIdx], 64)
-					if err != nil {
-						fmt.Printf("动作 %s (%s): 手牌 %s 的EV = 无法解析\n", childID, childLabels[i], targetHand)
-					} else {
-						fmt.Printf("动作 %s (%s): 手牌 %s 的EV = %.6f\n", childID, childLabels[i], targetHand, ev)
-					}
-				} else {
-					fmt.Printf("动作 %s (%s): 手牌 %s 的EV索引超出范围\n", childID, childLabels[i], targetHand)
-				}
-			}
-			fmt.Println()
-		}
-	}
-
-	// 6. 总结
-	fmt.Println("【总结】")
-	fmt.Printf("手牌: %s\n", targetHand)
-	fmt.Printf("节点: %s\n", node)
-	fmt.Printf("行动方: %s\n", actor)
-	for i, childID := range childNodeIDs {
-		if i < len(childLabels) && i < len(strategyResp) {
-			freqFields := strings.Fields(strategyResp[i])
-
-			// 获取频率
-			var freqStr = "无法解析"
-			var freq float64 = 0
-			if targetIdx < len(freqFields) {
-				var err error
-				freq, err = strconv.ParseFloat(freqFields[targetIdx], 64)
-				if err == nil {
-					freqStr = fmt.Sprintf("%.6f", freq)
-				}
-			}
-
-			// 获取EV
-			cmd = fmt.Sprintf("calc_ev %s %s", actorCmd, childID)
-			evResp, _ := client.ExecuteCommand(cmd, 10*time.Second)
-			var evStr = "无法解析"
-			var ev float64 = 0
-			if len(evResp) > 0 {
-				evFields := strings.Fields(evResp[0])
-				if targetIdx < len(evFields) {
-					var err error
-					ev, err = strconv.ParseFloat(evFields[targetIdx], 64)
-					if err == nil {
-						evStr = fmt.Sprintf("%.6f", ev)
-					} else {
-						evStr = evFields[targetIdx] // 保留原始值，如NaN或Inf
-					}
-				}
-			}
-
-			// 获取EQ (如果存在)
-			var eqStr = "未查询"
-			var eq float64 = 0
-			if len(eqResp) > 0 {
-				eqFields := strings.Fields(eqResp[0])
-				if targetIdx < len(eqFields) {
-					var err error
-					eq, err = strconv.ParseFloat(eqFields[targetIdx], 64)
-					if err == nil {
-						eqStr = fmt.Sprintf("%.6f", eq)
-					} else {
-						eqStr = eqFields[targetIdx] // 保留原始值，如NaN或Inf
-					}
-				}
-			}
-
-			// 判断是否会被过滤
-			var filterReason string
-			// 检查是否所有三个值都是无效值(0、NaN或Inf)
-			freqIsInvalid := freq == 0
-			evIsInvalid := ev == 0 || math.IsInf(ev, 0) || strings.Contains(strings.ToLower(evStr), "nan") || strings.Contains(strings.ToLower(evStr), "inf")
-			eqIsInvalid := eq == 0 || math.IsInf(eq, 0) || strings.Contains(strings.ToLower(eqStr), "nan") || strings.Contains(strings.ToLower(eqStr), "inf")
-
-			// 检查ev*matchup是否等于0且不是fold动作
-			// 注意: 在这个展示函数中，我们没有直接访问 matchup 数据，暂时使用 eq 作为近似
-			evMultMatchupIsZero := ev*eq == 0 && childLabels[i] != "fold"
-
-			// 只有当三个值都无效时或ev*matchup=0（非fold）时才标记为将被过滤
-			if (freqIsInvalid && evIsInvalid && eqIsInvalid) || evMultMatchupIsZero {
-				if evMultMatchupIsZero {
-					filterReason = "[将被过滤: ev*matchup=0且非fold动作]"
-				} else {
-					filterReason = "[将被过滤: 所有值都无效]"
-				}
-			}
-
-			if filterReason != "" {
-				fmt.Printf("动作 %s (%s): 频率 = %s, EV = %s, EQ = %s %s\n",
-					childID, childLabels[i], freqStr, evStr, eqStr, filterReason)
-			} else {
-				fmt.Printf("动作 %s (%s): 频率 = %s, EV = %s, EQ = %s\n",
-					childID, childLabels[i], freqStr, evStr, eqStr)
-			}
-		}
-	}
-
-	fmt.Println("\n======== 打印完成 ========\n")
 }
