@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +20,7 @@ import (
 )
 
 var handOrder *cache.HandOrder
+var boardOrder *cache.BoardOrder
 
 // CFR文件路径 - 用于生成输出文件名
 var cfrFilePath string
@@ -29,7 +32,10 @@ var (
 
 func main() {
 
-	client := upi.NewClient("./PioSOLVER3-edge.exe", `E:\zdsbddz\piosolver\piosolver3`)
+	client := upi.NewClient("./PioSOLVER3-edge.exe", `D:\gto\piosolver3`)
+
+	// 设置目标节点
+	targetNode := "r:0"
 
 	// 启动PioSolver
 	if err := client.Start(); err != nil {
@@ -45,14 +51,20 @@ func main() {
 
 	//创建HandOrder实例
 	handOrder = &cache.HandOrder{}
+	boardOrder = &cache.BoardOrder{}
 
 	// 初始化HandOrder
 	if err := handOrder.Init(client); err != nil {
 		log.Fatalf("初始化HandOrder失败: %v", err)
 	}
 
+	// 初始化BoardOrder
+	if err := boardOrder.Init(); err != nil {
+		log.Fatalf("初始化BoardOrder失败: %v", err)
+	}
+
 	// 加载树并保存CFR文件路径
-	cfrFilePath = `E:\zdsbddz\piosolver\piosolver3\saves\asth4d.cfr`
+	cfrFilePath = `D:\gto\piosolver3\saves\asth4d.cfr`
 	_, err = client.LoadTree(cfrFilePath)
 	if err != nil {
 		log.Fatalf("加载树失败: %v", err)
@@ -64,8 +76,7 @@ func main() {
 		log.Fatalf("创建输出目录失败: %v", err)
 	}
 
-	// 设置目标节点
-	targetNode := "r:0"
+	
 
 	// 打印目标手牌的原始UPI数据
 	// printTargetHandRawData(client, targetNode)
@@ -454,8 +465,10 @@ func parseNode(client *upi.Client, node string) {
 		cfrFileName = strings.TrimSuffix(cfrFileName, filepath.Ext(cfrFileName))
 
 		// 构建输出文件路径
-		outputPath := filepath.Join("data", cfrFileName+".json")
-		log.Printf("准备写入数据到文件: %s, 记录数: %d", outputPath, len(finalRecords))
+		outputJsonPath := filepath.Join("data", cfrFileName+".json")
+		outputSqlPath := filepath.Join("data", cfrFileName+".sql")
+		
+		log.Printf("准备写入数据到文件: %s, 记录数: %d", outputJsonPath, len(finalRecords))
 
 		// 检查输出目录是否存在，不存在则创建
 		err = os.MkdirAll("data", 0755)
@@ -476,14 +489,54 @@ func parseNode(client *upi.Client, node string) {
 				return
 			}
 
-			// 创建或覆盖文件
-			err = os.WriteFile(outputPath, jsonData, 0644)
+			// 创建或覆盖JSON文件
+			err = os.WriteFile(outputJsonPath, jsonData, 0644)
 			if err != nil {
-				log.Printf("写入文件失败: %v", err)
+				log.Printf("写入JSON文件失败: %v", err)
 				return
 			}
 
-			log.Printf("已将数据写入到文件: %s，大小: %d 字节", outputPath, len(jsonData))
+			// 创建SQL文件并写入表头
+			sqlFile, err := os.Create(outputSqlPath)
+			if err != nil {
+				log.Printf("创建SQL文件失败: %v", err)
+				return
+			}
+			defer sqlFile.Close()
+
+			// 写入SQL文件头部
+			sqlFile.WriteString("-- Generated SQL insert statements\n")
+			sqlFile.WriteString(fmt.Sprintf("-- Total records: %d\n\n", len(finalRecords)))
+
+			// 为每条记录生成SQL插入语句
+			log.Printf("开始生成SQL语句，总记录数: %d", len(finalRecords))
+			
+			for _, record := range finalRecords {
+				// 转换节点路径为标准格式
+				nodePrefix := convertNodePath(record.Node)
+				betLevel := calculateBetLevel(nodePrefix)
+				
+				// 标准化公牌顺序并获取board_id
+				standardizedBoard := standardizeBoard(record.Board)
+				boardId, ok := boardOrder.Index(standardizedBoard)
+				if !ok {
+					log.Printf("警告：无法找到公牌 %s (标准化后: %s) 的索引", record.Board, standardizedBoard)
+					continue
+				}
+				
+				// 计算bet_pct和spr
+				betPct, spr := calculateBetMetrics(record.PotInfo)
+				
+				// 生成SQL插入语句
+				sqlInsert := generateSQLInsert(record, nodePrefix, betLevel, boardId, record.Hand, betPct, spr)
+				if sqlInsert != "" {
+					if _, err := sqlFile.WriteString(sqlInsert); err != nil {
+						log.Printf("写入SQL语句失败: %v", err)
+					}
+				}
+			}
+
+			log.Printf("SQL生成完成，正在关闭文件...")
 
 			// 打印总结信息
 			log.Printf("处理完成根节点 %s，数据已保存到文件中", node)
@@ -491,7 +544,7 @@ func parseNode(client *upi.Client, node string) {
 			// 如果不是根节点，尝试读取现有文件
 			var existingRecords []*model.Record
 
-			fileData, err := os.ReadFile(outputPath)
+			fileData, err := os.ReadFile(outputJsonPath)
 			if err == nil && len(fileData) > 0 {
 				// 文件存在且不为空，尝试解析现有记录
 				err = json.Unmarshal(fileData, &existingRecords)
@@ -515,13 +568,13 @@ func parseNode(client *upi.Client, node string) {
 			}
 
 			// 写入合并后的记录
-			err = os.WriteFile(outputPath, jsonData, 0644)
+			err = os.WriteFile(outputJsonPath, jsonData, 0644)
 			if err != nil {
 				log.Printf("写入文件失败: %v", err)
 				return
 			}
 
-			log.Printf("已更新文件数据: %s，大小: %d 字节", outputPath, len(jsonData))
+			log.Printf("已更新文件数据: %s，大小: %d 字节", outputJsonPath, len(jsonData))
 		}
 	}
 
@@ -538,4 +591,177 @@ func parseNode(client *upi.Client, node string) {
 		// 打印总结信息
 		log.Printf("处理完成根节点 %s，数据已保存到文件中", node)
 	}
+}
+
+// 新增：转换节点路径为标准格式
+func convertNodePath(path string) string {
+	// 使用正则表达式匹配数字
+	re := regexp.MustCompile(`[rb](\d+)`)
+	// 将带数字的动作替换为单个字母
+	return re.ReplaceAllString(path, "${1}")
+}
+
+// 新增：计算下注次数
+func calculateBetLevel(nodePath string) int {
+	// 统计路径中的b（bet）的次数
+	return strings.Count(nodePath, "b")
+}
+
+// 修改：计算bet_pct和spr
+func calculateBetMetrics(potInfo string) (float64, float64) {
+	log.Printf("解析底池信息: %s", potInfo)
+
+	// 默认值
+	pot := 60.0  // 默认底池为60bb
+	bet := 0.0   // 默认没有下注
+	stack := 60.0 // 默认筹码为60bb
+
+	// 尝试从potInfo中解析信息
+	if potInfo != "" {
+		parts := strings.Split(potInfo, "|")
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			fields := strings.Fields(part)
+			if len(fields) >= 2 {
+				value, err := strconv.ParseFloat(fields[1], 64)
+				if err == nil {
+					switch fields[0] {
+					case "pot":
+						pot = value
+					case "bet":
+						bet = value
+					case "stack":
+						stack = value
+					}
+				}
+			}
+		}
+	}
+
+	// 计算bet_pct（下注占底池比例）
+	betPct := 0.0
+	if pot > 0 {
+		betPct = bet / pot
+	}
+
+	// 计算spr（栈底比）
+	spr := 0.0
+	if pot > 0 {
+		spr = stack / pot
+	}
+
+	log.Printf("计算结果: bet_pct=%.3f, spr=%.3f (pot=%.2f, bet=%.2f, stack=%.2f)",
+		betPct, spr, pot, bet, stack)
+
+	return betPct, spr
+}
+
+// 新增：生成SQL插入语句
+func generateSQLInsert(record *model.Record, nodePrefix string, betLevel int, boardId int64, hand string, betPct float64, spr float64) string {
+	// 确保至少有一个动作
+	if len(record.Actions) == 0 {
+		return ""
+	}
+
+	// 获取手牌的combo_id
+	comboId, ok := handOrder.Index(record.Hand)
+	if !ok {
+		log.Printf("警告：无法找到手牌 %s 的索引", record.Hand)
+		return ""
+	}
+
+	// 准备第一个动作的数据
+	action1 := record.Actions[0]
+	action1Label := action1.Label
+	action1Freq := action1.Freq
+	action1Ev := action1.Ev
+	action1Eq := action1.Eq
+
+	// 准备第二个动作的数据（如果存在）
+	var action2Label string
+	var action2Freq, action2Ev, action2Eq float64
+	if len(record.Actions) > 1 {
+		action2 := record.Actions[1]
+		action2Label = action2.Label
+		action2Freq = action2.Freq
+		action2Ev = action2.Ev
+		action2Eq = action2.Eq
+	}
+
+	// 生成INSERT语句
+	sql := fmt.Sprintf("INSERT INTO flop_60bb_co_bb (node_prefix, bet_level, board_id, combo_id, bet_pct, spr, "+
+		"action1, freq1, ev1, eq1, action2, freq2, ev2, eq2) VALUES "+
+		"('%s', %d, %d, %d, %.3f, %.3f, '%s', %.3f, %.3f, %.3f, '%s', %.3f, %.3f, %.3f);\n",
+		nodePrefix, betLevel, boardId, comboId, betPct, spr,
+		action1Label, action1Freq, action1Ev, action1Eq,
+		action2Label, action2Freq, action2Ev, action2Eq)
+
+	return sql
+}
+
+// 新增：标准化公牌顺序
+func standardizeBoard(board string) string {
+	// 移除多余的空格
+	board = strings.TrimSpace(board)
+	
+	// 分割成单张牌
+	cards := strings.Fields(board)
+	if len(cards) != 3 {
+		return board // 如果不是3张牌，返回原始字符串
+	}
+	
+	// 对牌进行排序（按照值和花色）
+	sort.Slice(cards, func(i, j int) bool {
+		// 获取牌值和花色
+		rank1, suit1 := cards[i][0], cards[i][1]
+		rank2, suit2 := cards[j][0], cards[j][1]
+		
+		// 转换 T、J、Q、K、A 为对应的数值
+		rankValue := func(r byte) int {
+			switch r {
+			case 'T':
+				return 10
+			case 'J':
+				return 11
+			case 'Q':
+				return 12
+			case 'K':
+				return 13
+			case 'A':
+				return 14
+			default:
+				if r >= '2' && r <= '9' {
+					return int(r - '0')
+				}
+				return 0
+			}
+		}
+		
+		// 首先按牌值比较
+		rank1Val := rankValue(rank1)
+		rank2Val := rankValue(rank2)
+		if rank1Val != rank2Val {
+			return rank1Val > rank2Val // 大的牌在前面
+		}
+		
+		// 牌值相同时按花色排序 (s > h > d > c)
+		suitValue := func(s byte) int {
+			switch s {
+			case 's':
+				return 4
+			case 'h':
+				return 3
+			case 'd':
+				return 2
+			case 'c':
+				return 1
+			default:
+				return 0
+			}
+		}
+		return suitValue(suit1) > suitValue(suit2)
+	})
+	
+	// 重新组合成字符串
+	return strings.Join(cards, " ")
 }

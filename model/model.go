@@ -21,9 +21,10 @@ type ChildNode struct {
 }
 
 type Record struct {
-	Node    string   `json:"node"`    //节点id
-	Actor   string   `json:"actor"`   //行动方
-	Board   string   `json:"board"`   //公共牌
-	Hand    string   `json:"hand"`    //玩家手牌
-	Actions []Action `json:"actions"` //玩家动作
+	Node     string   `json:"node"`      //节点id
+	Actor    string   `json:"actor"`     //行动方
+	Board    string   `json:"board"`     //公共牌
+	Hand     string   `json:"hand"`      //玩家手牌
+	Actions  []Action `json:"actions"`   //玩家动作
+	PotInfo  string   `json:"pot_info"`  //底池信息
 }
