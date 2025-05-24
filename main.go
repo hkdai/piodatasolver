@@ -30,8 +30,48 @@ var (
 	filteredActionCount int = 0
 )
 
-func main() {
+// 新增：从set_board命令提取公牌信息
+func extractBoardFromTemplate(templateContent string) string {
+	// 正则表达式：匹配set_board命令
+	setBoardRegex := regexp.MustCompile(`(?m)^set_board\s+([A-Za-z0-9]+)`)
+	match := setBoardRegex.FindStringSubmatch(templateContent)
+	if len(match) >= 2 {
+		return match[1]
+	}
+	return ""
+}
 
+
+
+// 修改main函数，添加命令行参数支持
+func main() {
+	// 检查命令行参数
+	if len(os.Args) < 2 {
+		fmt.Println("用法: go run main.go [parse|calc]")
+		fmt.Println("  parse - 解析PioSolver数据并生成JSON/SQL文件")
+		fmt.Println("  calc  - 执行PioSolver计算功能")
+		os.Exit(1)
+	}
+
+	command := os.Args[1]
+
+	switch command {
+	case "parse":
+		log.Println("执行解析功能...")
+		runParseCommand()
+	case "calc":
+		log.Println("执行计算功能...")
+		runCalcCommand()
+	default:
+		fmt.Printf("未知命令: %s\n", command)
+		fmt.Println("支持的命令: parse, calc")
+		os.Exit(1)
+	}
+}
+
+// runParseCommand 执行原有的解析功能
+func runParseCommand() {
+	// 原有的单个CFR文件处理逻辑
 	client := upi.NewClient("./PioSOLVER3-edge.exe", `D:\gto\piosolver3`)
 
 	// 设置目标节点
@@ -64,7 +104,7 @@ func main() {
 	}
 
 	// 加载树并保存CFR文件路径
-	cfrFilePath = `D:\gto\piosolver3\saves\asth4d.cfr`
+	cfrFilePath = `D:\gto\piosolver3\saves\asth4d-allin.cfr`
 	_, err = client.LoadTree(cfrFilePath)
 	if err != nil {
 		log.Fatalf("加载树失败: %v", err)
@@ -75,11 +115,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("创建输出目录失败: %v", err)
 	}
-
-	
-
-	// 打印目标手牌的原始UPI数据
-	// printTargetHandRawData(client, targetNode)
 
 	// 解析节点并生成JSON
 	log.Println("开始解析节点并生成JSON...")
@@ -121,6 +156,52 @@ func main() {
 
 	// 给程序时间响应
 	time.Sleep(5 * time.Second)
+}
+
+// runCalcCommand 执行计算功能（新功能框架）
+func runCalcCommand() {
+	log.Println("==================================")
+	log.Println("【计算功能】正在初始化...")
+	log.Println("==================================")
+
+	// TODO: 这里将实现PioSolver的计算功能
+	// 可能包括：
+	// 1. 连接PioSolver
+	// 2. 设置计算参数
+	// 3. 执行求解
+	// 4. 监控计算进度
+	// 5. 保存计算结果
+
+	log.Println("初始化PioSolver客户端...")
+	client := upi.NewClient("./PioSOLVER3-edge.exe", `D:\gto\piosolver3`)
+
+	// 启动PioSolver
+	if err := client.Start(); err != nil {
+		log.Fatalf("启动PioSolver失败: %v", err)
+	}
+	defer client.Close()
+
+	// 检查PioSolver是否准备好
+	ready, err := client.IsReady()
+	if err != nil || !ready {
+		log.Fatalf("PioSolver未准备好: %v", err)
+	}
+
+	log.Println("PioSolver已就绪，准备执行计算任务...")
+	
+	// 模拟计算过程
+	log.Println("开始执行计算...")
+	log.Println("设置游戏参数...")
+	log.Println("配置求解参数...")
+	log.Println("启动求解进程...")
+	
+	// 这里可以添加实际的计算逻辑
+	time.Sleep(2 * time.Second)
+	
+	log.Println("计算完成！")
+	log.Println("==================================")
+	log.Println("【计算功能】执行完毕")
+	log.Println("==================================")
 }
 
 func parseNode(client *upi.Client, node string) {
