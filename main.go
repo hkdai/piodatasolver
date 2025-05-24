@@ -104,7 +104,7 @@ func runParseCommand() {
 	}
 
 	// 加载树并保存CFR文件路径
-	cfrFilePath = `D:\gto\piosolver3\saves\asth4d-allin.cfr`
+	cfrFilePath = `D:\gto\piosolver3\saves\asth4d-allin-flops.cfr`
 	_, err = client.LoadTree(cfrFilePath)
 	if err != nil {
 		log.Fatalf("加载树失败: %v", err)
@@ -189,11 +189,21 @@ func runCalcCommand() {
 
 	log.Println("PioSolver已就绪，准备执行计算任务...")
 	
+	// 获取公牌子集数据
+	flopSubsets := cache.GetFlopSubsets()
+	log.Printf("已加载 %d 个公牌组合", len(flopSubsets))
+	
 	// 模拟计算过程
 	log.Println("开始执行计算...")
 	log.Println("设置游戏参数...")
 	log.Println("配置求解参数...")
 	log.Println("启动求解进程...")
+	
+	// 演示使用公牌数据
+	if len(flopSubsets) > 0 {
+		log.Printf("第一个公牌组合示例: %s", flopSubsets[0])
+		log.Printf("最后一个公牌组合示例: %s", flopSubsets[len(flopSubsets)-1])
+	}
 	
 	// 这里可以添加实际的计算逻辑
 	time.Sleep(2 * time.Second)
