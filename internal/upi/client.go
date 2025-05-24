@@ -90,7 +90,6 @@ func (c *Client) ExecuteCommand(command string, timeout time.Duration) ([]string
 	}
 
 	// 发送命令
-
 	if _, err := fmt.Fprintln(c.stdin, command); err != nil {
 		return nil, fmt.Errorf("发送命令失败: %v", err)
 	}
@@ -128,9 +127,6 @@ func (c *Client) readResponseUntilEnd(timeout time.Duration) ([]string, error) {
 			line = strings.TrimSuffix(line, "\n")
 			line = strings.TrimSuffix(line, "\r")
 
-			// 打印响应行
-			// fmt.Printf("收到响应: %s\n", line)
-
 			// 检查是否是结束标记
 			if line == c.endString {
 				doneChan <- true
@@ -153,6 +149,77 @@ func (c *Client) readResponseUntilEnd(timeout time.Duration) ([]string, error) {
 	case <-time.After(timeout):
 		return nil, fmt.Errorf("读取响应超时")
 	}
+}
+
+// ExecuteGoCommandWithStream 执行go命令并返回实时输出流
+// 这个方法专门用于处理go命令，因为go命令会持续输出而不发送结束标记
+func (c *Client) ExecuteGoCommandWithStream() (<-chan string, <-chan error, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.started {
+		return nil, nil, fmt.Errorf("客户端未启动")
+	}
+
+	// 发送go命令
+	if _, err := fmt.Fprintln(c.stdin, "go"); err != nil {
+		return nil, nil, fmt.Errorf("发送go命令失败: %v", err)
+	}
+
+	// 创建输出通道
+	outputChan := make(chan string, 100) // 缓冲通道避免阻塞
+	errChan := make(chan error, 1)
+
+	// 启动goroutine持续读取输出
+	go func() {
+		defer close(outputChan)
+		defer close(errChan)
+
+		reader := bufio.NewReader(c.stdout)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				if err == io.EOF {
+					// PioSolver进程结束
+					return
+				}
+				errChan <- err
+				return
+			}
+
+			// 处理行
+			line = strings.TrimSuffix(line, "\n")
+			line = strings.TrimSuffix(line, "\r")
+
+			// 跳过空行
+			if line == "" {
+				continue
+			}
+
+			// 发送到输出通道
+			select {
+			case outputChan <- line:
+			default:
+				// 通道满了，跳过这行（避免阻塞）
+			}
+		}
+	}()
+
+	return outputChan, errChan, nil
+}
+
+// TestConnection 测试连接是否正常，尝试恢复通信
+func (c *Client) TestConnection() error {
+	// 发送一个简单的命令来测试连接
+	for attempts := 0; attempts < 3; attempts++ {
+		_, err := c.ExecuteCommand("show_memory", 5*time.Second)
+		if err == nil {
+			return nil
+		}
+		log.Printf("连接测试失败(尝试 %d/3): %v", attempts+1, err)
+		time.Sleep(1 * time.Second)
+	}
+	return fmt.Errorf("连接测试失败，无法恢复通信")
 }
 
 // IsReady 检查PioSolver是否准备好
@@ -226,3 +293,8 @@ func (c *Client) Close() error {
 	c.started = false
 	return nil
 }
+
+// GetStdin 获取标准输入写入器，用于直接发送命令
+func (c *Client) GetStdin() io.WriteCloser {
+	return c.stdin
+} 

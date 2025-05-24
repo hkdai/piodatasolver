@@ -41,15 +41,14 @@ func extractBoardFromTemplate(templateContent string) string {
 	return ""
 }
 
-
-
 // 修改main函数，添加命令行参数支持
 func main() {
 	// 检查命令行参数
 	if len(os.Args) < 2 {
-		fmt.Println("用法: go run main.go [parse|calc]")
+		fmt.Println("用法: go run main.go [parse|calc] [参数]")
 		fmt.Println("  parse - 解析PioSolver数据并生成JSON/SQL文件")
-		fmt.Println("  calc  - 执行PioSolver计算功能")
+		fmt.Println("  calc <路径> - 执行PioSolver批量计算功能")
+		fmt.Println("    例如: go run main.go calc \"D:\\gto\\piosolver3\\TreeBuilding\\mtt\\40bb\"")
 		os.Exit(1)
 	}
 
@@ -60,8 +59,15 @@ func main() {
 		log.Println("执行解析功能...")
 		runParseCommand()
 	case "calc":
-		log.Println("执行计算功能...")
-		runCalcCommand()
+		if len(os.Args) < 3 {
+			fmt.Println("错误: calc命令需要指定脚本路径")
+			fmt.Println("用法: go run main.go calc <脚本路径>")
+			fmt.Println("例如: go run main.go calc \"D:\\gto\\piosolver3\\TreeBuilding\\mtt\\40bb\"")
+			os.Exit(1)
+		}
+		scriptPath := os.Args[2]
+		log.Printf("执行计算功能，脚本路径: %s", scriptPath)
+		runCalcCommand(scriptPath)
 	default:
 		fmt.Printf("未知命令: %s\n", command)
 		fmt.Println("支持的命令: parse, calc")
@@ -158,59 +164,136 @@ func runParseCommand() {
 	time.Sleep(5 * time.Second)
 }
 
-// runCalcCommand 执行计算功能（新功能框架）
-func runCalcCommand() {
+// runCalcCommand 执行批量计算功能
+func runCalcCommand(scriptPath string) {
 	log.Println("==================================")
-	log.Println("【计算功能】正在初始化...")
+	log.Println("【批量计算功能】正在初始化...")
+	log.Printf("脚本路径: %s", scriptPath)
 	log.Println("==================================")
 
-	// TODO: 这里将实现PioSolver的计算功能
-	// 可能包括：
-	// 1. 连接PioSolver
-	// 2. 设置计算参数
-	// 3. 执行求解
-	// 4. 监控计算进度
-	// 5. 保存计算结果
-
-	log.Println("初始化PioSolver客户端...")
-	client := upi.NewClient("./PioSOLVER3-edge.exe", `D:\gto\piosolver3`)
-
-	// 启动PioSolver
-	if err := client.Start(); err != nil {
-		log.Fatalf("启动PioSolver失败: %v", err)
-	}
-	defer client.Close()
-
-	// 检查PioSolver是否准备好
-	ready, err := client.IsReady()
-	if err != nil || !ready {
-		log.Fatalf("PioSolver未准备好: %v", err)
+	// 检查脚本路径是否存在
+	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+		log.Fatalf("脚本路径不存在: %s", scriptPath)
 	}
 
-	log.Println("PioSolver已就绪，准备执行计算任务...")
+	// 获取路径最后一个文件夹名称作为前缀
+	pathPrefix := filepath.Base(scriptPath)
+	log.Printf("文件名前缀: %s", pathPrefix)
+
+	// 读取脚本文件
+	scriptFiles, err := readScriptFiles(scriptPath)
+	if err != nil {
+		log.Fatalf("读取脚本文件失败: %v", err)
+	}
 	
+	log.Printf("找到 %d 个脚本文件", len(scriptFiles))
+	for i, file := range scriptFiles {
+		log.Printf("  %d. %s", i+1, file)
+	}
+
 	// 获取公牌子集数据
-	flopSubsets := cache.GetFlopSubsets()
-	log.Printf("已加载 %d 个公牌组合", len(flopSubsets))
+	allFlopSubsets := cache.GetFlopSubsets()
+	// 使用所有公牌组合
+	flopSubsets := allFlopSubsets
+	log.Printf("已加载 %d 个公牌组合 (生产模式，处理全部公牌)", len(flopSubsets))
+
+	// 开始批量处理
+	totalTasks := len(scriptFiles) * len(flopSubsets)
+	currentTask := 0
 	
-	// 模拟计算过程
-	log.Println("开始执行计算...")
-	log.Println("设置游戏参数...")
-	log.Println("配置求解参数...")
-	log.Println("启动求解进程...")
+	// 时间统计变量
+	var totalTime time.Duration = 0
+	var completedTasks int = 0
 	
-	// 演示使用公牌数据
-	if len(flopSubsets) > 0 {
-		log.Printf("第一个公牌组合示例: %s", flopSubsets[0])
-		log.Printf("最后一个公牌组合示例: %s", flopSubsets[len(flopSubsets)-1])
+	log.Printf("总任务数: %d (脚本文件: %d × 公牌组合: %d)", totalTasks, len(scriptFiles), len(flopSubsets))
+	
+	// 遍历脚本文件
+	for _, scriptFile := range scriptFiles {
+		scriptName := getScriptName(scriptFile)
+		log.Printf("\n处理脚本文件: %s", scriptName)
+		
+		// 读取脚本内容
+		scriptContent, err := readScriptContent(scriptFile)
+		if err != nil {
+			log.Printf("读取脚本内容失败: %v，跳过此文件", err)
+			continue
+		}
+		
+		// 遍历公牌组合
+		for flopIndex, flop := range flopSubsets {
+			currentTask++
+			flopProgress := flopIndex + 1 // 从1开始计数
+			
+			// 记录任务开始时间
+			taskStartTime := time.Now()
+			
+			// 计算平均时间显示
+			var avgTimeStr string
+			if completedTasks > 0 {
+				avgTime := totalTime / time.Duration(completedTasks)
+				avgTimeStr = fmt.Sprintf(", 平均用时: %v", avgTime.Round(time.Second))
+			} else {
+				avgTimeStr = ""
+			}
+			
+			log.Printf("\n[%d/%d] 处理脚本: %s, 公牌: %s (%d/%d)%s", currentTask, totalTasks, scriptName, flop, flopProgress, len(flopSubsets), avgTimeStr)
+			
+			// 为每个任务创建新的PioSolver实例
+			log.Printf("  → 启动新的PioSolver实例... (%d/%d)", flopProgress, len(flopSubsets))
+			client := upi.NewClient("./PioSOLVER3-edge.exe", `D:\gto\piosolver3`)
+			
+			// 启动PioSolver
+			if err := client.Start(); err != nil {
+				log.Printf("  ❌ 启动PioSolver失败: %v，跳过此任务 (%d/%d)", err, flopProgress, len(flopSubsets))
+				continue
+			}
+			
+			// 检查PioSolver是否准备好
+			ready, err := client.IsReady()
+			if err != nil || !ready {
+				log.Printf("  ❌ PioSolver未准备好: %v，跳过此任务 (%d/%d)", err, flopProgress, len(flopSubsets))
+				client.Close()
+				continue
+			}
+			
+			log.Printf("  ✓ PioSolver实例就绪 (%d/%d)", flopProgress, len(flopSubsets))
+			
+			// 处理单个任务（计算+导出）
+			err = processSingleTask(client, scriptContent, scriptName, flop, pathPrefix, flopProgress, len(flopSubsets))
+			
+			// 关闭PioSolver实例
+			log.Printf("  → 关闭PioSolver实例... (%d/%d)", flopProgress, len(flopSubsets))
+			client.Close()
+			
+			// 计算任务用时并更新统计
+			taskDuration := time.Since(taskStartTime)
+			
+			if err != nil {
+				log.Printf("  ❌ 处理任务失败: %v (%d/%d)", err, flopProgress, len(flopSubsets))
+			} else {
+				// 更新时间统计
+				totalTime += taskDuration
+				completedTasks++
+				
+				// 计算新的平均时间
+				avgTime := totalTime / time.Duration(completedTasks)
+				
+				log.Printf("  ✓ [%d/%d] 任务完成: %s_%s (%d/%d) [用时: %v, 平均: %v]", 
+					currentTask, totalTasks, scriptName, flop, flopProgress, len(flopSubsets), 
+					taskDuration.Round(time.Second), avgTime.Round(time.Second))
+			}
+		}
 	}
 	
-	// 这里可以添加实际的计算逻辑
-	time.Sleep(2 * time.Second)
-	
-	log.Println("计算完成！")
-	log.Println("==================================")
-	log.Println("【计算功能】执行完毕")
+	log.Println("\n==================================")
+	log.Println("【批量计算功能】全部完成！")
+	if completedTasks > 0 {
+		avgTime := totalTime / time.Duration(completedTasks)
+		log.Printf("成功处理 %d 个任务，总用时: %v，平均用时: %v", 
+			completedTasks, totalTime.Round(time.Second), avgTime.Round(time.Second))
+	} else {
+		log.Printf("处理了 %d 个任务", totalTasks)
+	}
 	log.Println("==================================")
 }
 
@@ -856,3 +939,392 @@ func standardizeBoard(board string) string {
 	// 重新组合成字符串
 	return strings.Join(cards, " ")
 }
+
+// readScriptFiles 读取指定路径下的所有脚本文件
+func readScriptFiles(scriptPath string) ([]string, error) {
+	var scriptFiles []string
+	
+	// 读取目录下的所有文件
+	files, err := os.ReadDir(scriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取目录失败: %v", err)
+	}
+	
+	// 过滤出脚本文件（.txt文件）
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+		
+		fileName := file.Name()
+		if strings.HasSuffix(strings.ToLower(fileName), ".txt") {
+			fullPath := filepath.Join(scriptPath, fileName)
+			scriptFiles = append(scriptFiles, fullPath)
+		}
+	}
+	
+	if len(scriptFiles) == 0 {
+		return nil, fmt.Errorf("在路径 %s 下未找到任何 .txt 脚本文件", scriptPath)
+	}
+	
+	return scriptFiles, nil
+}
+
+// getScriptName 从完整路径中提取脚本文件名（不含扩展名）
+func getScriptName(scriptPath string) string {
+	fileName := filepath.Base(scriptPath)
+	return strings.TrimSuffix(fileName, filepath.Ext(fileName))
+}
+
+// readScriptContent 读取脚本文件内容
+func readScriptContent(scriptPath string) (string, error) {
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return "", fmt.Errorf("读取文件失败: %v", err)
+	}
+	return string(content), nil
+}
+
+// replaceSetBoard 替换脚本中的set_board命令
+func replaceSetBoard(scriptContent, flop string) string {
+	// 使用正则表达式匹配set_board命令并替换
+	setBoardRegex := regexp.MustCompile(`(?m)^set_board\s+.*$`)
+	newSetBoard := fmt.Sprintf("set_board %s", flop)
+	return setBoardRegex.ReplaceAllString(scriptContent, newSetBoard)
+}
+
+// processSingleTask 处理单个计算任务
+func processSingleTask(client *upi.Client, scriptContent, scriptName, flop, pathPrefix string, flopProgress, totalFlops int) error {
+	log.Printf("  → 开始执行任务... (%d/%d)", flopProgress, totalFlops)
+	
+	log.Printf("  → 替换set_board命令为: set_board %s (%d/%d)", flop, flopProgress, totalFlops)
+	
+	// 替换脚本中的set_board命令
+	modifiedScript := replaceSetBoard(scriptContent, flop)
+	
+	// 将修改后的脚本按行分割
+	scriptLines := strings.Split(modifiedScript, "\n")
+	
+	log.Printf("  → 执行脚本命令 (%d 行)", len(scriptLines))
+	
+	// 逐行执行脚本命令
+	executedCount := 0
+	for _, line := range scriptLines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue // 跳过空行和注释
+		}
+		
+		// 执行命令
+		_, err := client.ExecuteCommand(line, 30*time.Second)
+		if err != nil {
+			return fmt.Errorf("执行命令失败 '%s': %v", line, err)
+		}
+		
+		executedCount++
+	}
+	
+	log.Printf("  ✓ 脚本执行完成，共执行 %d 条命令 (%d/%d)", executedCount, flopProgress, totalFlops)
+	
+	log.Printf("  → 确保设置正确的精度...")
+	
+	// 在执行go命令之前，确保设置正确的精度
+	accuracyResponses, err := client.ExecuteCommand("set_accuracy 0.12", 5*time.Second)
+	if err != nil {
+		log.Printf("  警告：设置精度失败: %v", err)
+	} else {
+		for _, response := range accuracyResponses {
+			log.Printf("  精度设置响应: %s", response)
+		}
+	}
+	
+	log.Printf("  → 执行go命令启动计算... (%d/%d)", flopProgress, totalFlops)
+	
+	// 使用专门的方法执行go命令，获取实时输出流
+	outputChan, errChan, err := client.ExecuteGoCommandWithStream()
+	if err != nil {
+		return fmt.Errorf("执行go命令失败: %v", err)
+	}
+	
+	log.Printf("  → 计算已启动，开始监听PioSolver输出... (%d/%d)", flopProgress, totalFlops)
+	
+	// 等待计算完成，使用实时输出流
+	err = waitForCalculationCompleteWithStream(outputChan, errChan)
+	if err != nil {
+		return fmt.Errorf("等待计算完成失败: %v", err)
+	}
+	
+	// 简短等待让stream完全停止
+	log.Printf("  → 等待输出流停止... (%d/%d)", flopProgress, totalFlops)
+	time.Sleep(1 * time.Second)
+	
+	log.Printf("  ✓ 计算完成，开始导出... (%d/%d)", flopProgress, totalFlops)
+	
+	// 生成导出文件名
+	outputFileName := fmt.Sprintf("%s_%s_%s.cfr", pathPrefix, scriptName, flop)
+	outputPath := fmt.Sprintf(`D:\gto\piosolver3\saves\%s`, outputFileName)
+	
+	log.Printf("  → 导出文件: %s (%d/%d)", outputFileName, flopProgress, totalFlops)
+	
+	// 直接发送导出命令，不等待响应
+	dumpCmd := fmt.Sprintf(`dump_tree "%s" no_rivers `, outputPath)
+	log.Printf("  → 执行导出命令: %s (%d/%d)", dumpCmd, flopProgress, totalFlops)
+	
+	// 直接发送命令，不使用ExecuteCommand以避免等待响应
+	_, err = fmt.Fprintln(client.GetStdin(), dumpCmd)
+	if err != nil {
+		log.Printf("  ❌ 发送导出命令失败: %v (%d/%d)", err, flopProgress, totalFlops)
+		return fmt.Errorf("发送导出命令失败: %v", err)
+	}
+	
+	// 等待一点时间让导出命令执行，但不等待响应
+	time.Sleep(2 * time.Second)
+	
+	log.Printf("  ✓ 导出命令已发送: %s (%d/%d)", outputFileName, flopProgress, totalFlops)
+	
+	return nil
+}
+
+// waitForCalculationCompleteWithStream 通过实时输出流等待计算完成
+func waitForCalculationCompleteWithStream(outputChan <-chan string, errChan <-chan error) error {
+	log.Printf("    监控PioSolver实时输出...")
+	
+	maxWaitTime := 30 * time.Minute // 最长等待30分钟
+	noOutputTimeout := 30 * time.Second // 如果30秒没有输出，认为计算完成
+	
+	startTime := time.Now()
+	lastOutputTime := time.Now()
+	goOkFound := false
+	
+	for {
+		select {
+		case line, ok := <-outputChan:
+			if !ok {
+				// 输出通道关闭，PioSolver进程结束
+				log.Printf("    ✓ PioSolver进程结束，计算完成")
+				return nil
+			}
+			
+			// 更新最后输出时间
+			lastOutputTime = time.Now()
+			elapsed := time.Since(startTime)
+			
+			// 检查go命令启动确认
+			if strings.Contains(line, "go ok!") {
+				goOkFound = true
+				log.Printf("    PioSolver: %s - 计算已启动", line)
+				continue
+			}
+			
+			// 如果还没有看到go ok!，继续等待
+			if !goOkFound {
+				log.Printf("    PioSolver: %s", line)
+				continue
+			}
+			
+			// 过滤并显示重要的计算信息
+			if strings.Contains(line, "running time:") ||
+			   strings.Contains(line, "EV OOP:") ||
+			   strings.Contains(line, "EV IP:") ||
+			   strings.Contains(line, "Exploitable for:") ||
+			   strings.Contains(line, "SOLVER:") {
+				log.Printf("    PioSolver: %s (用时: %v)", line, elapsed.Round(time.Second))
+				
+				// 检查计算完成的信号
+				if strings.Contains(line, "SOLVER: stopped (required accuracy reached)") {
+					log.Printf("    ✓ 检测到计算完成信号！")
+					return nil
+				}
+				if strings.Contains(line, "SOLVER: stopped") && !strings.Contains(line, "started") {
+					log.Printf("    ✓ 检测到求解器停止！")
+					return nil
+				}
+				
+				// 检测可剥削值 - 保持严格的精度要求
+				if strings.Contains(line, "Exploitable for:") {
+					parts := strings.Fields(line)
+					if len(parts) >= 3 {
+						exploitableStr := parts[2]
+						if exploitable, err := strconv.ParseFloat(exploitableStr, 64); err == nil {
+							log.Printf("    → 当前可剥削值: %.6f (目标: ≤0.12)", exploitable)
+							// 保持严格的精度要求：可剥削值小于等于0.12
+							if exploitable <= 0.12 {
+								log.Printf("    ✓ 可剥削值 %.6f 达到精度要求，计算完成！", exploitable)
+								return nil
+							}
+						}
+					}
+				}
+			}
+			
+		case err := <-errChan:
+			if err != nil {
+				return fmt.Errorf("读取PioSolver输出时出错: %v", err)
+			}
+			
+		case <-time.After(1 * time.Second):
+			// 定期检查超时条件
+			elapsed := time.Since(startTime)
+			
+			// 检查总超时时间
+			if elapsed > maxWaitTime {
+				return fmt.Errorf("计算超时，超过最大等待时间 %v", maxWaitTime)
+			}
+			
+			// 检查是否长时间没有输出
+			if time.Since(lastOutputTime) > noOutputTimeout {
+				log.Printf("    ✓ 长时间无输出，认为计算已完成（无输出时间: %v）", time.Since(lastOutputTime).Round(time.Second))
+				return nil
+			}
+			
+			// 每30秒显示一次进度
+			if int(elapsed.Seconds())%30 == 0 && goOkFound {
+				log.Printf("    计算进行中... (已用时: %v)", elapsed.Round(time.Second))
+			}
+		}
+	}
+}
+
+// waitForCalculationComplete 等待计算完成（保留原方法作为备用）
+func waitForCalculationComplete(client *upi.Client) error {
+	log.Printf("    监控PioSolver计算日志...")
+	
+	maxWaitTime := 30 * time.Minute // 最长等待30分钟
+	checkInterval := 2 * time.Second // 每2秒检查一次
+	noResponseTimeout := 30 * time.Second // 如果30秒没有响应，认为计算完成
+	
+	startTime := time.Now()
+	lastResponseTime := time.Now()
+	consecutiveCalculatingCount := 0 // 连续"计算中..."的计数器
+	
+	for {
+		// 检查是否超时
+		if time.Since(startTime) > maxWaitTime {
+			return fmt.Errorf("计算超时，超过最大等待时间 %v", maxWaitTime)
+		}
+		
+		// 检查是否长时间没有响应（可能计算已完成）
+		if time.Since(lastResponseTime) > noResponseTimeout {
+			log.Printf("    ✓ 长时间无响应，认为计算已完成（无响应时间: %v）", time.Since(lastResponseTime).Round(time.Second))
+			return nil
+		}
+		
+		// 使用show_memory命令获取计算状态
+		responses, err := client.ExecuteCommand("show_memory", 3*time.Second)
+		if err != nil {
+			elapsed := time.Since(startTime)
+			consecutiveCalculatingCount++
+			log.Printf("    计算中... (已用时: %v, 连续%d次)", elapsed.Round(time.Second), consecutiveCalculatingCount)
+			
+			// 当连续出现"计算中..."五次以上时，主动查询当前精度
+			if consecutiveCalculatingCount >= 5 {
+				log.Printf("    → 连续%d次显示计算中，主动查询当前计算精度...", consecutiveCalculatingCount)
+				
+				// 尝试使用不同的命令查询状态
+				statusResponses, statusErr := client.ExecuteCommand("show_memory", 5*time.Second)
+				if statusErr == nil {
+					for _, response := range statusResponses {
+						response = strings.TrimSpace(response)
+						if response == "" {
+							continue
+						}
+						
+						log.Printf("    状态查询: %s", response)
+						
+						// 检测可剥削值
+						if strings.Contains(response, "Exploitable for:") {
+							parts := strings.Fields(response)
+							if len(parts) >= 3 {
+								exploitableStr := parts[2]
+								if exploitable, err := strconv.ParseFloat(exploitableStr, 64); err == nil {
+									log.Printf("    → 当前可剥削值: %.6f (目标: ≤0.12)", exploitable)
+									// 保持原来的精度要求：小于等于0.12
+									if exploitable <= 0.12 {
+										log.Printf("    ✓ 可剥削值 %.6f 达到精度要求，计算完成！", exploitable)
+										return nil
+									}
+									// 重置计数器，因为我们获得了有效的状态信息
+									consecutiveCalculatingCount = 0
+									lastResponseTime = time.Now()
+								}
+							}
+						}
+						
+						// 检查其他完成信号
+						if strings.Contains(response, "SOLVER: stopped (required accuracy reached)") {
+							log.Printf("    ✓ 检测到计算完成信号！")
+							return nil
+						}
+						if strings.Contains(response, "SOLVER: stopped") && !strings.Contains(response, "started") {
+							log.Printf("    ✓ 检测到求解器停止！")
+							return nil
+						}
+					}
+				} else {
+					log.Printf("    状态查询失败: %v", statusErr)
+				}
+			}
+		} else {
+			// 显示经过时间
+			elapsed := time.Since(startTime)
+			
+			// 过滤并显示有用的PioSolver计算信息
+			hasValidResponse := false
+			for _, response := range responses {
+				response = strings.TrimSpace(response)
+				if response == "" {
+					continue
+				}
+				
+				// 只显示计算相关的重要信息
+				if strings.Contains(response, "running time:") ||
+				   strings.Contains(response, "EV OOP:") ||
+				   strings.Contains(response, "EV IP:") ||
+				   strings.Contains(response, "Exploitable for:") ||
+				   strings.Contains(response, "SOLVER:") {
+					log.Printf("    PioSolver: %s", response)
+					hasValidResponse = true
+					lastResponseTime = time.Now() // 更新最后响应时间
+					consecutiveCalculatingCount = 0 // 重置计数器
+					
+					// 检查计算完成的信号
+					if strings.Contains(response, "SOLVER: stopped (required accuracy reached)") {
+						log.Printf("    ✓ 检测到计算完成信号！")
+						return nil
+					}
+					if strings.Contains(response, "SOLVER: stopped") && !strings.Contains(response, "started") {
+						log.Printf("    ✓ 检测到求解器停止！")
+						return nil
+					}
+					// 检测可剥削值 - 保持原来的精度要求
+					if strings.Contains(response, "Exploitable for:") {
+						parts := strings.Fields(response)
+						if len(parts) >= 3 {
+							exploitableStr := parts[2]
+							if exploitable, err := strconv.ParseFloat(exploitableStr, 64); err == nil {
+								// 保持严格的精度要求：可剥削值小于等于0.12
+								if exploitable <= 0.12 {
+									log.Printf("    ✓ 可剥削值 %.6f 达到精度要求，计算完成！", exploitable)
+									return nil
+								}
+							}
+						}
+					}
+				}
+			}
+			
+			// 如果没有有效的计算信息，只显示时间
+			if !hasValidResponse {
+				consecutiveCalculatingCount++
+				log.Printf("    计算中... (已用时: %v, 连续%d次)", elapsed.Round(time.Second), consecutiveCalculatingCount)
+			}
+		}
+		
+		// 等待下次检查
+		time.Sleep(checkInterval)
+	}
+}
+
+
+
+
