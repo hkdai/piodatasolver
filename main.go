@@ -28,8 +28,8 @@ var cfrFilePath string
 // PioSolver相关路径配置 - 方便修改
 const (
 	pioSolverExePath = "./PioSOLVER3-edge.exe"                  // PioSolver可执行文件路径
-	pioSolverWorkDir = `E:\zdsbddz\piosolver\piosolver3\`       // PioSolver工作目录
-	exportSavePath   = `E:\zdsbddz\piosolver\piosolver3\saves\` // 导出文件保存路径
+	pioSolverWorkDir = `D:\gto\piosolver3\`       // PioSolver工作目录
+	exportSavePath   = `D:\gto\piosolver3\saves\` // 导出文件保存路径
 )
 
 // 全局变量，用于统计过滤的动作数量
@@ -1165,6 +1165,9 @@ func processSingleTask(client *upi.Client, scriptContent, scriptName, flop, path
 		log.Printf("  ❌ 发送导出命令失败: %v (%d/%d)", err, flopProgress, totalFlops)
 		return fmt.Errorf("发送导出命令失败: %v", err)
 	}
+
+	// 等待一点时间让导出命令执行，但不等待响应
+	time.Sleep(2 * time.Second)
 
 	log.Printf("  ✓ 导出命令已发送: %s (%d/%d)", outputFileName, flopProgress, totalFlops)
 
