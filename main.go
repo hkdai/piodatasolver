@@ -27,9 +27,9 @@ var cfrFilePath string
 
 // PioSolver相关路径配置 - 方便修改
 const (
-	pioSolverExePath = "./PioSOLVER3-edge.exe"    // PioSolver可执行文件路径
-	pioSolverWorkDir = `D:\gto\piosolver3`        // PioSolver工作目录
-	exportSavePath   = `D:\gto\piosolver3\saves\` // 导出文件保存路径
+	pioSolverExePath = "./PioSOLVER3-edge.exe"                  // PioSolver可执行文件路径
+	pioSolverWorkDir = `E:\zdsbddz\piosolver\piosolver3\`       // PioSolver工作目录
+	exportSavePath   = `E:\zdsbddz\piosolver\piosolver3\saves\` // 导出文件保存路径
 )
 
 // 全局变量，用于统计过滤的动作数量
@@ -52,10 +52,10 @@ func extractBoardFromTemplate(templateContent string) string {
 func main() {
 	// 检查命令行参数
 	if len(os.Args) < 2 {
-		fmt.Println("用法: go run main.go [parse|calc] [参数]")
+		fmt.Println("用法: piodatasolver.exe [parse|calc] [参数]")
 		fmt.Println("  parse - 解析PioSolver数据并生成JSON/SQL文件")
 		fmt.Println("  calc <路径> - 执行PioSolver批量计算功能")
-		fmt.Println("    例如: go run main.go calc \"D:\\gto\\piosolver3\\TreeBuilding\\mtt\\40bb\"")
+		fmt.Println("    例如: piodatasolver.exe calc \"D:\\gto\\piosolver3\\TreeBuilding\\mtt\\40bb\"")
 		os.Exit(1)
 	}
 
@@ -68,8 +68,8 @@ func main() {
 	case "calc":
 		if len(os.Args) < 3 {
 			fmt.Println("错误: calc命令需要指定脚本路径")
-			fmt.Println("用法: go run main.go calc <脚本路径>")
-			fmt.Println("例如: go run main.go calc \"D:\\gto\\piosolver3\\TreeBuilding\\mtt\\40bb\"")
+			fmt.Println("用法: piodatasolver.exe calc <脚本路径>")
+			fmt.Println("例如: piodatasolver.exe calc \"D:\\gto\\piosolver3\\TreeBuilding\\mtt\\40bb\"")
 			os.Exit(1)
 		}
 		scriptPath := os.Args[2]
@@ -204,9 +204,38 @@ func runCalcCommand(scriptPath string) {
 	flopSubsets := allFlopSubsets
 	log.Printf("已加载 %d 个公牌组合 (生产模式，处理全部公牌)", len(flopSubsets))
 
-	// 开始批量处理
+	// 检查已存在的文件
+	log.Println("\n==================================")
+	log.Println("【检查已存在文件】")
+	existingFiles, err := checkExistingFiles()
+	if err != nil {
+		log.Fatalf("检查已存在文件失败: %v", err)
+	}
+
+	// 统计需要处理的任务
 	totalTasks := len(scriptFiles) * len(flopSubsets)
+	skippedTasks := 0
 	currentTask := 0
+
+	// 预先统计会跳过多少任务
+	for _, scriptFile := range scriptFiles {
+		scriptName := getScriptName(scriptFile)
+		for _, flop := range flopSubsets {
+			taskFileName := generateTaskFileName(pathPrefix, scriptName, flop)
+			if existingFiles[taskFileName] {
+				skippedTasks++
+			}
+		}
+	}
+
+	actualTasks := totalTasks - skippedTasks
+	log.Printf("总任务数: %d，已完成: %d，需要处理: %d", totalTasks, skippedTasks, actualTasks)
+	log.Println("==================================")
+
+	if actualTasks == 0 {
+		log.Println("🎉 所有任务都已完成，无需重新计算！")
+		return
+	}
 
 	// 时间统计变量
 	var totalTime time.Duration = 0
@@ -231,6 +260,13 @@ func runCalcCommand(scriptPath string) {
 			currentTask++
 			flopProgress := flopIndex + 1 // 从1开始计数
 
+			// 检查文件是否已存在
+			taskFileName := generateTaskFileName(pathPrefix, scriptName, flop)
+			if existingFiles[taskFileName] {
+				log.Printf("\n[%d/%d] ⏭️  跳过已存在: %s, 公牌: %s (%d/%d)", currentTask, totalTasks, scriptName, flop, flopProgress, len(flopSubsets))
+				continue
+			}
+
 			// 记录任务开始时间
 			taskStartTime := time.Now()
 
@@ -243,7 +279,7 @@ func runCalcCommand(scriptPath string) {
 				avgTimeStr = ""
 			}
 
-			log.Printf("\n[%d/%d] 处理脚本: %s, 公牌: %s (%d/%d)%s", currentTask, totalTasks, scriptName, flop, flopProgress, len(flopSubsets), avgTimeStr)
+			log.Printf("\n[%d/%d] 🚀 开始计算: %s, 公牌: %s (%d/%d)%s", currentTask, totalTasks, scriptName, flop, flopProgress, len(flopSubsets), avgTimeStr)
 
 			// 为每个任务创建新的PioSolver实例
 			log.Printf("  → 启动新的PioSolver实例... (%d/%d)", flopProgress, len(flopSubsets))
@@ -294,12 +330,13 @@ func runCalcCommand(scriptPath string) {
 
 	log.Println("\n==================================")
 	log.Println("【批量计算功能】全部完成！")
+	log.Printf("📊 任务统计:")
+	log.Printf("   总任务数: %d", totalTasks)
+	log.Printf("   已跳过: %d (文件已存在)", skippedTasks)
+	log.Printf("   新完成: %d", completedTasks)
 	if completedTasks > 0 {
 		avgTime := totalTime / time.Duration(completedTasks)
-		log.Printf("成功处理 %d 个任务，总用时: %v，平均用时: %v",
-			completedTasks, totalTime.Round(time.Second), avgTime.Round(time.Second))
-	} else {
-		log.Printf("处理了 %d 个任务", totalTasks)
+		log.Printf("   总用时: %v，平均用时: %v", totalTime.Round(time.Second), avgTime.Round(time.Second))
 	}
 	log.Println("==================================")
 }
@@ -1000,6 +1037,51 @@ func replaceSetBoard(scriptContent, flop string) string {
 	return setBoardRegex.ReplaceAllString(scriptContent, newSetBoard)
 }
 
+// checkExistingFiles 检查导出目录中已存在的文件
+func checkExistingFiles() (map[string]bool, error) {
+	existingFiles := make(map[string]bool)
+
+	// 检查导出目录是否存在
+	if _, err := os.Stat(exportSavePath); os.IsNotExist(err) {
+		log.Printf("导出目录不存在: %s，将创建新目录", exportSavePath)
+		// 创建目录
+		if err := os.MkdirAll(exportSavePath, 0755); err != nil {
+			return nil, fmt.Errorf("创建导出目录失败: %v", err)
+		}
+		return existingFiles, nil
+	}
+
+	// 读取目录中的所有.cfr文件
+	files, err := os.ReadDir(exportSavePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取导出目录失败: %v", err)
+	}
+
+	// 统计已存在的.cfr文件
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		fileName := file.Name()
+		if strings.HasSuffix(strings.ToLower(fileName), ".cfr") {
+			// 移除.cfr扩展名作为键
+			baseName := strings.TrimSuffix(fileName, ".cfr")
+			existingFiles[baseName] = true
+		}
+	}
+
+	log.Printf("检查导出目录: %s", exportSavePath)
+	log.Printf("发现已存在的.cfr文件: %d 个", len(existingFiles))
+
+	return existingFiles, nil
+}
+
+// generateTaskFileName 生成任务文件名（不含扩展名）
+func generateTaskFileName(pathPrefix, scriptName, flop string) string {
+	return fmt.Sprintf("%s_%s_%s", pathPrefix, scriptName, flop)
+}
+
 // processSingleTask 处理单个计算任务
 func processSingleTask(client *upi.Client, scriptContent, scriptName, flop, pathPrefix string, flopProgress, totalFlops int) error {
 	log.Printf("  → 开始执行任务... (%d/%d)", flopProgress, totalFlops)
@@ -1083,9 +1165,6 @@ func processSingleTask(client *upi.Client, scriptContent, scriptName, flop, path
 		log.Printf("  ❌ 发送导出命令失败: %v (%d/%d)", err, flopProgress, totalFlops)
 		return fmt.Errorf("发送导出命令失败: %v", err)
 	}
-
-	// 等待一点时间让导出命令执行，但不等待响应
-	time.Sleep(2 * time.Second)
 
 	log.Printf("  ✓ 导出命令已发送: %s (%d/%d)", outputFileName, flopProgress, totalFlops)
 
