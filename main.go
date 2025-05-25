@@ -25,8 +25,12 @@ var boardOrder *cache.BoardOrder
 // CFR文件路径 - 用于生成输出文件名
 var cfrFilePath string
 
-// 导出文件保存路径 - 方便修改
-const exportSavePath = `D:\gto\piosolver3\saves\`
+// PioSolver相关路径配置 - 方便修改
+const (
+	pioSolverExePath = "./PioSOLVER3-edge.exe"    // PioSolver可执行文件路径
+	pioSolverWorkDir = `D:\gto\piosolver3`        // PioSolver工作目录
+	exportSavePath   = `D:\gto\piosolver3\saves\` // 导出文件保存路径
+)
 
 // 全局变量，用于统计过滤的动作数量
 var (
@@ -81,7 +85,7 @@ func main() {
 // runParseCommand 执行原有的解析功能
 func runParseCommand() {
 	// 原有的单个CFR文件处理逻辑
-	client := upi.NewClient("./PioSOLVER3-edge.exe", `D:\gto\piosolver3`)
+	client := upi.NewClient(pioSolverExePath, pioSolverWorkDir)
 
 	// 设置目标节点
 	targetNode := "r:0"
@@ -243,7 +247,7 @@ func runCalcCommand(scriptPath string) {
 
 			// 为每个任务创建新的PioSolver实例
 			log.Printf("  → 启动新的PioSolver实例... (%d/%d)", flopProgress, len(flopSubsets))
-			client := upi.NewClient("./PioSOLVER3-edge.exe", `D:\gto\piosolver3`)
+			client := upi.NewClient(pioSolverExePath, pioSolverWorkDir)
 
 			// 启动PioSolver
 			if err := client.Start(); err != nil {
