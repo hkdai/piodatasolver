@@ -22,14 +22,14 @@ import (
 var handOrder *cache.HandOrder
 var boardOrder *cache.BoardOrder
 
-// CFR文件路径 - 用于生成输出文件名
+// CFR文件路径 - 用于生成输出文件名（在处理过程中动态设置）
 var cfrFilePath string
 
 // PioSolver相关路径配置 - 方便修改
 const (
 	pioSolverExePath = "./PioSOLVER3-edge.exe"                  // PioSolver可执行文件路径
-	pioSolverWorkDir = `D:\gto\piosolver3\`       // PioSolver工作目录
-	exportSavePath   = `D:\gto\piosolver3\saves\` // 导出文件保存路径
+	pioSolverWorkDir = `E:\zdsbddz\piosolver\piosolver3\`       // PioSolver工作目录
+	exportSavePath   = `E:\zdsbddz\piosolver\piosolver3\saves\` // 导出文件保存路径
 )
 
 // 全局变量，用于统计过滤的动作数量
@@ -53,8 +53,9 @@ func main() {
 	// 检查命令行参数
 	if len(os.Args) < 2 {
 		fmt.Println("用法: piodatasolver.exe [parse|calc] [参数]")
-		fmt.Println("  parse - 解析PioSolver数据并生成JSON/SQL文件")
-		fmt.Println("  calc <路径> - 执行PioSolver批量计算功能")
+		fmt.Println("  parse <CFR文件夹路径> - 解析指定文件夹下的所有CFR文件并生成JSON/SQL文件")
+		fmt.Println("    例如: piodatasolver.exe parse \"E:\\zdsbddz\\piosolver\\piosolver3\\saves\"")
+		fmt.Println("  calc <脚本路径> - 执行PioSolver批量计算功能")
 		fmt.Println("    例如: piodatasolver.exe calc \"D:\\gto\\piosolver3\\TreeBuilding\\mtt\\40bb\"")
 		os.Exit(1)
 	}
@@ -63,8 +64,15 @@ func main() {
 
 	switch command {
 	case "parse":
-		log.Println("执行解析功能...")
-		runParseCommand()
+		if len(os.Args) < 3 {
+			fmt.Println("错误: parse命令需要指定CFR文件夹路径")
+			fmt.Println("用法: piodatasolver.exe parse <CFR文件夹路径>")
+			fmt.Println("例如: piodatasolver.exe parse \"E:\\zdsbddz\\piosolver\\piosolver3\\saves\"")
+			os.Exit(1)
+		}
+		cfrFolderPath := os.Args[2]
+		log.Printf("执行解析功能，CFR文件夹路径: %s", cfrFolderPath)
+		runParseCommand(cfrFolderPath)
 	case "calc":
 		if len(os.Args) < 3 {
 			fmt.Println("错误: calc命令需要指定脚本路径")
@@ -82,15 +90,58 @@ func main() {
 	}
 }
 
-// runParseCommand 执行原有的解析功能
-func runParseCommand() {
-	// 原有的单个CFR文件处理逻辑
-	client := upi.NewClient(pioSolverExePath, pioSolverWorkDir)
+// getEffectiveStack 获取当前树的有效起始筹码
+func getEffectiveStack(client *upi.Client) (float64, error) {
+	responses, err := client.ExecuteCommand("show_effective_stack", 10*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("执行show_effective_stack命令失败: %v", err)
+	}
 
-	// 设置目标节点
-	targetNode := "r:0"
+	if len(responses) == 0 {
+		return 0, fmt.Errorf("show_effective_stack返回空响应")
+	}
+
+	// 解析第一行响应，应该是一个数值
+	stackStr := strings.TrimSpace(responses[0])
+	stack, err := strconv.ParseFloat(stackStr, 64)
+	if err != nil {
+		return 0, fmt.Errorf("解析有效筹码失败: %s, %v", stackStr, err)
+	}
+
+	return stack, nil
+}
+
+// runParseCommand 执行解析功能，处理指定文件夹下的所有CFR文件
+func runParseCommand(cfrFolderPath string) {
+	log.Println("==================================")
+	log.Println("【批量解析功能】正在初始化...")
+	log.Printf("CFR文件夹路径: %s", cfrFolderPath)
+	log.Println("==================================")
+
+	// 检查CFR文件夹路径是否存在
+	if _, err := os.Stat(cfrFolderPath); os.IsNotExist(err) {
+		log.Fatalf("CFR文件夹路径不存在: %s", cfrFolderPath)
+	}
+
+	// 读取文件夹下的所有CFR文件
+	cfrFiles, err := readCfrFiles(cfrFolderPath)
+	if err != nil {
+		log.Fatalf("读取CFR文件失败: %v", err)
+	}
+
+	log.Printf("找到 %d 个CFR文件", len(cfrFiles))
+	for i, file := range cfrFiles {
+		log.Printf("  %d. %s", i+1, filepath.Base(file))
+	}
+
+	// 创建输出目录
+	err = os.MkdirAll("data", 0755)
+	if err != nil {
+		log.Fatalf("创建输出目录失败: %v", err)
+	}
 
 	// 启动PioSolver
+	client := upi.NewClient(pioSolverExePath, pioSolverWorkDir)
 	if err := client.Start(); err != nil {
 		log.Fatalf("启动PioSolver失败: %v", err)
 	}
@@ -116,56 +167,127 @@ func runParseCommand() {
 		log.Fatalf("初始化BoardOrder失败: %v", err)
 	}
 
-	// 加载树并保存CFR文件路径
-	cfrFilePath = exportSavePath + `asth4d-allin-flops.cfr`
-	_, err = client.LoadTree(cfrFilePath)
+	// 设置目标节点
+	targetNode := "r:0"
+
+	// 检查已存在的解析结果文件
+	log.Println("\n==================================")
+	log.Println("【检查已存在的解析结果】")
+	existingResults, err := checkExistingParseResults()
 	if err != nil {
-		log.Fatalf("加载树失败: %v", err)
+		log.Fatalf("检查已存在解析结果失败: %v", err)
 	}
 
-	// 创建输出目录
-	err = os.MkdirAll("data", 0755)
-	if err != nil {
-		log.Fatalf("创建输出目录失败: %v", err)
-	}
+	// 统计需要处理的任务
+	totalFiles := len(cfrFiles)
+	skippedFiles := 0
+	currentFile := 0
 
-	// 解析节点并生成JSON
-	log.Println("开始解析节点并生成JSON...")
-	parseNode(client, targetNode)
-	log.Println("节点解析完成，JSON生成完毕")
+	// 预先统计会跳过多少文件
+	for _, cfrFile := range cfrFiles {
+		_, cfrFileName := filepath.Split(cfrFile)
+		cfrFileName = strings.TrimSuffix(cfrFileName, filepath.Ext(cfrFileName))
+		jsonFileName := cfrFileName + ".json"
+		sqlFileName := cfrFileName + ".sql"
 
-	// 读取生成的JSON文件并统计有效record总数
-	_, cfrFileName := filepath.Split(cfrFilePath)
-	cfrFileName = strings.TrimSuffix(cfrFileName, filepath.Ext(cfrFileName))
-	outputPath := filepath.Join("data", cfrFileName+".json")
-
-	// 读取JSON文件
-	fileData, err := os.ReadFile(outputPath)
-	if err != nil {
-		log.Printf("读取JSON文件失败: %v", err)
-	} else {
-		// 解析JSON数据
-		var records []*model.Record
-		err = json.Unmarshal(fileData, &records)
-		if err != nil {
-			log.Printf("解析JSON数据失败: %v", err)
-		} else {
-			// 统计总记录数和有效动作数
-			totalActions := 0
-			for _, record := range records {
-				totalActions += len(record.Actions)
-			}
-
-			// 计算过滤比例
-			totalOriginalActions := totalActions + filteredActionCount
-			filterRatio := float64(filteredActionCount) / float64(totalOriginalActions) * 100
-
-			fmt.Printf("\n\n==================================\n")
-			fmt.Printf("【统计信息】共生成有效record %d 条，包含有效动作 %d 个\n", len(records), totalActions)
-			fmt.Printf("【过滤信息】共过滤掉无效动作 %d 个 (占总数的 %.2f%%)\n", filteredActionCount, filterRatio)
-			fmt.Printf("==================================\n\n")
+		if existingResults[jsonFileName] && existingResults[sqlFileName] {
+			skippedFiles++
 		}
 	}
+
+	actualFiles := totalFiles - skippedFiles
+	log.Printf("总CFR文件数: %d，已解析: %d，需要处理: %d", totalFiles, skippedFiles, actualFiles)
+	log.Println("==================================")
+
+	if actualFiles == 0 {
+		log.Println("🎉 所有CFR文件都已解析完成，无需重新处理！")
+		return
+	}
+
+	// 循环处理每个CFR文件
+	for i, cfrFile := range cfrFiles {
+		currentFile = i + 1
+
+		// 检查文件是否已经解析过
+		_, cfrFileName := filepath.Split(cfrFile)
+		cfrFileName = strings.TrimSuffix(cfrFileName, filepath.Ext(cfrFileName))
+		jsonFileName := cfrFileName + ".json"
+		sqlFileName := cfrFileName + ".sql"
+
+		if existingResults[jsonFileName] && existingResults[sqlFileName] {
+			log.Printf("\n[%d/%d] ⏭️  跳过已解析: %s (JSON和SQL文件已存在)", currentFile, totalFiles, filepath.Base(cfrFile))
+			continue
+		}
+
+		log.Printf("\n[%d/%d] 🚀 开始处理CFR文件: %s", currentFile, totalFiles, filepath.Base(cfrFile))
+
+		// 重置过滤计数器
+		filteredActionCount = 0
+
+		// 设置全局CFR文件路径
+		cfrFilePath = cfrFile
+
+		// 加载树
+		_, err = client.LoadTree(cfrFilePath)
+		if err != nil {
+			log.Printf("  ❌ 加载树失败: %v，跳过此文件", err)
+			continue
+		}
+
+		log.Printf("  ✓ CFR文件加载成功")
+
+		// 获取有效筹码
+		log.Printf("  → 获取有效筹码...")
+		effectiveStack, err := getEffectiveStack(client)
+		if err != nil {
+			log.Printf("  ❌ 获取有效筹码失败: %v，使用默认值60bb", err)
+			effectiveStack = 60.0
+		} else {
+			log.Printf("  ✓ 有效筹码: %.2f bb", effectiveStack)
+		}
+
+		// 解析节点并生成JSON
+		log.Printf("  → 开始解析节点并生成JSON...")
+		parseNode(client, targetNode, effectiveStack)
+		log.Printf("  ✓ 节点解析完成")
+
+		// 读取生成的JSON文件并统计有效record总数
+		_, cfrFileNameForOutput := filepath.Split(cfrFilePath)
+		cfrFileNameForOutput = strings.TrimSuffix(cfrFileNameForOutput, filepath.Ext(cfrFileNameForOutput))
+		outputPath := filepath.Join("data", cfrFileNameForOutput+".json")
+
+		// 读取JSON文件
+		fileData, err := os.ReadFile(outputPath)
+		if err != nil {
+			log.Printf("  ❌ 读取JSON文件失败: %v", err)
+		} else {
+			// 解析JSON数据
+			var records []*model.Record
+			err = json.Unmarshal(fileData, &records)
+			if err != nil {
+				log.Printf("  ❌ 解析JSON数据失败: %v", err)
+			} else {
+				// 统计总记录数和有效动作数
+				totalActions := 0
+				for _, record := range records {
+					totalActions += len(record.Actions)
+				}
+
+				// 计算过滤比例
+				totalOriginalActions := totalActions + filteredActionCount
+				filterRatio := float64(filteredActionCount) / float64(totalOriginalActions) * 100
+
+				log.Printf("  ✓ [%d/%d] 文件处理完成: %s", currentFile, totalFiles, filepath.Base(cfrFile))
+				log.Printf("    📊 生成有效record %d 条，包含有效动作 %d 个", len(records), totalActions)
+				log.Printf("    🗑️  过滤掉无效动作 %d 个 (占总数的 %.2f%%)", filteredActionCount, filterRatio)
+			}
+		}
+	}
+
+	log.Println("\n==================================")
+	log.Println("【批量解析功能】全部完成！")
+	log.Printf("📊 总共处理了 %d 个CFR文件", totalFiles)
+	log.Println("==================================")
 
 	// 给程序时间响应
 	time.Sleep(5 * time.Second)
@@ -341,7 +463,7 @@ func runCalcCommand(scriptPath string) {
 	log.Println("==================================")
 }
 
-func parseNode(client *upi.Client, node string) {
+func parseNode(client *upi.Client, node string, effectiveStack float64) {
 	//show_node 获取当前节点信息，公牌，行动方（IP/OOP）
 	cmd := fmt.Sprintf("show_node %s", node)
 	responses, err := client.ExecuteCommand(cmd, 10*time.Second)
@@ -456,17 +578,24 @@ func parseNode(client *upi.Client, node string) {
 		log.Printf("手牌数量错误: %d，使用现有手牌继续", len(handCards))
 	}
 
+	// 计算当前节点的bet_pct、spr和stack_depth
+	betPct, spr, stackDepth := calculateBetMetrics(pot, node, effectiveStack)
+
 	// 创建一个映射，存储每个手牌的Record
 	handRecords := make(map[string]*model.Record)
 
 	// 先为每个手牌创建一个Record
 	for _, hand := range handCards {
 		handRecords[hand] = &model.Record{
-			Node:    node,
-			Actor:   actor,
-			Board:   board,
-			Hand:    hand,
-			Actions: []model.Action{}, // 初始化空的Actions数组
+			Node:       node,
+			Actor:      actor,
+			Board:      board,
+			Hand:       hand,
+			Actions:    []model.Action{}, // 初始化空的Actions数组
+			PotInfo:    pot,              // 设置底池信息
+			StackDepth: stackDepth,       // 设置筹码深度
+			Spr:        spr,              // 设置栈底比
+			BetPct:     betPct,           // 设置下注比例
 		}
 	}
 
@@ -698,109 +827,128 @@ func parseNode(client *upi.Client, node string) {
 		// 判断是否为根节点(深度为1)
 		isRootNode := strings.Count(node, ":") <= 1
 
-		// 如果是根节点，则创建或覆盖文件
+		// 处理JSON文件：根节点创建新文件，子节点追加到现有文件
+		var allRecords []*model.Record
 		if isRootNode {
-			// 将所有记录序列化为JSON
-			jsonData, err := json.MarshalIndent(finalRecords, "", "  ")
-			if err != nil {
-				log.Printf("JSON序列化失败: %v", err)
-				return
+			// 根节点：创建新的JSON文件
+			allRecords = finalRecords
+		} else {
+			// 子节点：读取现有文件并追加新记录
+			fileData, err := os.ReadFile(outputJsonPath)
+			if err == nil && len(fileData) > 0 {
+				// 文件存在且不为空，尝试解析现有记录
+				err = json.Unmarshal(fileData, &allRecords)
+				if err != nil {
+					log.Printf("解析现有JSON文件失败: %v，将创建新文件", err)
+					allRecords = []*model.Record{}
+				}
+			} else {
+				// 文件不存在或为空，创建空记录数组
+				allRecords = []*model.Record{}
 			}
+			// 将新记录追加到现有记录中
+			allRecords = append(allRecords, finalRecords...)
+		}
 
-			// 创建或覆盖JSON文件
-			err = os.WriteFile(outputJsonPath, jsonData, 0644)
-			if err != nil {
-				log.Printf("写入JSON文件失败: %v", err)
-				return
-			}
+		// 序列化所有记录并写入JSON文件
+		jsonData, err := json.MarshalIndent(allRecords, "", "  ")
+		if err != nil {
+			log.Printf("JSON序列化失败: %v", err)
+			return
+		}
 
-			// 创建SQL文件并写入表头
-			sqlFile, err := os.Create(outputSqlPath)
+		err = os.WriteFile(outputJsonPath, jsonData, 0644)
+		if err != nil {
+			log.Printf("写入JSON文件失败: %v", err)
+			return
+		}
+
+		// 处理SQL文件：根节点创建新文件，子节点追加到现有文件
+		var sqlFile *os.File
+		if isRootNode {
+			// 根节点：创建新的SQL文件
+			sqlFile, err = os.Create(outputSqlPath)
 			if err != nil {
 				log.Printf("创建SQL文件失败: %v", err)
 				return
 			}
-			defer sqlFile.Close()
-
 			// 写入SQL文件头部
 			sqlFile.WriteString("-- Generated SQL insert statements\n")
-			sqlFile.WriteString(fmt.Sprintf("-- Total records: %d\n\n", len(finalRecords)))
+			sqlFile.WriteString(fmt.Sprintf("-- CFR File: %s\n", filepath.Base(cfrFilePath)))
+			sqlFile.WriteString(fmt.Sprintf("-- Total records will be added incrementally\n\n"))
+		} else {
+			// 子节点：以追加模式打开SQL文件
+			sqlFile, err = os.OpenFile(outputSqlPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				log.Printf("打开SQL文件失败: %v", err)
+				return
+			}
+		}
+		defer sqlFile.Close()
 
-			// 为每条记录生成SQL插入语句
-			log.Printf("开始生成SQL语句，总记录数: %d", len(finalRecords))
+		// 为当前节点的所有记录生成SQL插入语句
+		log.Printf("开始生成SQL语句，当前节点记录数: %d", len(finalRecords))
 
-			for _, record := range finalRecords {
-				// 转换节点路径为标准格式
-				nodePrefix := convertNodePath(record.Node)
-				betLevel := calculateBetLevel(nodePrefix)
+		// 统计变量
+		var (
+			totalProcessed   = 0
+			boardIndexFailed = 0
+			handIndexFailed  = 0
+			sqlGenerated     = 0
+			sqlWriteFailed   = 0
+		)
 
-				// 标准化公牌顺序并获取board_id
-				standardizedBoard := standardizeBoard(record.Board)
-				boardId, ok := boardOrder.Index(standardizedBoard)
-				if !ok {
-					log.Printf("警告：无法找到公牌 %s (标准化后: %s) 的索引", record.Board, standardizedBoard)
-					continue
-				}
+		for _, record := range finalRecords {
+			totalProcessed++
 
-				// 计算bet_pct和spr
-				betPct, spr := calculateBetMetrics(record.PotInfo)
+			// 转换节点路径为标准格式
+			nodePrefix := convertNodePath(record.Node)
+			betLevel := calculateBetLevel(nodePrefix)
 
-				// 生成SQL插入语句
-				sqlInsert := generateSQLInsert(record, nodePrefix, betLevel, boardId, record.Hand, betPct, spr)
-				if sqlInsert != "" {
-					if _, err := sqlFile.WriteString(sqlInsert); err != nil {
-						log.Printf("写入SQL语句失败: %v", err)
-					}
-				}
+			// 标准化公牌顺序并获取board_id
+			standardizedBoard := standardizeBoard(record.Board)
+			boardId, ok := boardOrder.Index(standardizedBoard)
+			if !ok {
+				boardIndexFailed++
+				log.Printf("警告：无法找到公牌 %s (标准化后: %s) 的索引", record.Board, standardizedBoard)
+				continue
 			}
 
-			log.Printf("SQL生成完成，正在关闭文件...")
-
-			// 打印总结信息
-			log.Printf("处理完成根节点 %s，数据已保存到文件中", node)
-		} else {
-			// 如果不是根节点，尝试读取现有文件
-			var existingRecords []*model.Record
-
-			fileData, err := os.ReadFile(outputJsonPath)
-			if err == nil && len(fileData) > 0 {
-				// 文件存在且不为空，尝试解析现有记录
-				err = json.Unmarshal(fileData, &existingRecords)
-				if err != nil {
-					log.Printf("解析现有文件失败: %v，将创建新文件", err)
-					existingRecords = []*model.Record{}
+			// 生成SQL插入语句（使用Record中已计算的值）
+			sqlInsert := generateSQLInsert(record, nodePrefix, betLevel, boardId, record.Hand, record.BetPct, record.Spr)
+			if sqlInsert != "" {
+				sqlGenerated++
+				if _, err := sqlFile.WriteString(sqlInsert); err != nil {
+					sqlWriteFailed++
+					log.Printf("写入SQL语句失败: %v", err)
 				}
 			} else {
-				// 文件不存在或为空，创建空记录数组
-				existingRecords = []*model.Record{}
+				handIndexFailed++
 			}
-
-			// 将新记录合并到现有记录中
-			existingRecords = append(existingRecords, finalRecords...)
-
-			// 序列化所有记录
-			jsonData, err := json.MarshalIndent(existingRecords, "", "  ")
-			if err != nil {
-				log.Printf("JSON序列化失败: %v", err)
-				return
-			}
-
-			// 写入合并后的记录
-			err = os.WriteFile(outputJsonPath, jsonData, 0644)
-			if err != nil {
-				log.Printf("写入文件失败: %v", err)
-				return
-			}
-
-			log.Printf("已更新文件数据: %s，大小: %d 字节", outputJsonPath, len(jsonData))
 		}
+
+		// 输出详细统计信息
+		nodeType := "根节点"
+		if !isRootNode {
+			nodeType = "子节点"
+		}
+		log.Printf("%s SQL生成统计:", nodeType)
+		log.Printf("  当前节点处理记录数: %d", totalProcessed)
+		log.Printf("  公牌索引失败: %d", boardIndexFailed)
+		log.Printf("  手牌索引失败: %d", handIndexFailed)
+		log.Printf("  成功生成SQL: %d", sqlGenerated)
+		log.Printf("  写入失败: %d", sqlWriteFailed)
+
+		// 打印总结信息
+		log.Printf("处理完成节点 %s (%s)，JSON总记录数: %d，当前节点SQL: %d",
+			node, nodeType, len(allRecords), sqlGenerated)
 	}
 
 	//遍历子节点，递归调用解析，但是当子节点的类型为SPLIT_NODE时，不再递归调用
 	for _, child := range children {
 		if child.NodeType != "SPLIT_NODE" {
 			// 递归处理子节点
-			parseNode(client, child.NodeID)
+			parseNode(client, child.NodeID, effectiveStack)
 		}
 	}
 
@@ -825,53 +973,100 @@ func calculateBetLevel(nodePath string) int {
 	return strings.Count(nodePath, "b")
 }
 
-// 修改：计算bet_pct和spr
-func calculateBetMetrics(potInfo string) (float64, float64) {
+// 修改：计算bet_pct、spr和stack_depth
+func calculateBetMetrics(potInfo string, nodeId string, effectiveStack float64) (float64, float64, float64) {
 	log.Printf("解析底池信息: %s", potInfo)
 
 	// 默认值
-	pot := 60.0   // 默认底池为60bb
-	bet := 0.0    // 默认没有下注
-	stack := 60.0 // 默认筹码为60bb
+	var oop, ip, dead float64 = 0, 0, 0
 
-	// 尝试从potInfo中解析信息
+	// 解析potInfo：三个整数，以空格分隔，分别对应oop, ip, dead
 	if potInfo != "" {
-		parts := strings.Split(potInfo, "|")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			fields := strings.Fields(part)
-			if len(fields) >= 2 {
-				value, err := strconv.ParseFloat(fields[1], 64)
-				if err == nil {
-					switch fields[0] {
-					case "pot":
-						pot = value
-					case "bet":
-						bet = value
-					case "stack":
-						stack = value
-					}
-				}
+		potInfo = strings.TrimSpace(potInfo)
+		fields := strings.Fields(potInfo)
+
+		if len(fields) >= 3 {
+			// 解析oop（第一个值）
+			if val, err := strconv.ParseFloat(fields[0], 64); err == nil {
+				oop = val
 			}
+			// 解析ip（第二个值）
+			if val, err := strconv.ParseFloat(fields[1], 64); err == nil {
+				ip = val
+			}
+			// 解析dead（第三个值）
+			if val, err := strconv.ParseFloat(fields[2], 64); err == nil {
+				dead = val
+			}
+		} else {
+			log.Printf("警告：底池信息格式不正确，期望3个数值，实际得到: %d 个", len(fields))
 		}
 	}
 
-	// 计算bet_pct（下注占底池比例）
+	// 计算总底池大小
+	totalPot := oop + ip + dead
+
+	// 计算bet_pct（最近一次下注占底池比例）
+	// 从nodeId中提取最后一个冒号后的值来判断最近的行动
 	betPct := 0.0
-	if pot > 0 {
-		betPct = bet / pot
+	if nodeId != "" {
+		// 找到最后一个冒号的位置
+		lastColonIndex := strings.LastIndex(nodeId, ":")
+		if lastColonIndex != -1 && lastColonIndex < len(nodeId)-1 {
+			lastAction := nodeId[lastColonIndex+1:]
+			log.Printf("提取最后行动: %s", lastAction)
+
+			if lastAction == "c" {
+				// check行动，下注为0
+				betPct = 0.0
+				log.Printf("检测到check行动，bet_pct = 0.0")
+			} else if strings.HasPrefix(lastAction, "b") {
+				// 下注行动，提取下注金额
+				betAmountStr := strings.TrimPrefix(lastAction, "b")
+				if betAmount, err := strconv.ParseFloat(betAmountStr, 64); err == nil {
+					if totalPot > 0 {
+						betPct = betAmount / totalPot
+						log.Printf("检测到下注行动: b%s，下注金额: %.2f，底池: %.2f，bet_pct: %.3f",
+							betAmountStr, betAmount, totalPot, betPct)
+					}
+				} else {
+					log.Printf("警告：无法解析下注金额: %s", betAmountStr)
+				}
+			} else if strings.HasPrefix(lastAction, "r") {
+				// raise行动，提取加注金额
+				raiseAmountStr := strings.TrimPrefix(lastAction, "r")
+				if raiseAmount, err := strconv.ParseFloat(raiseAmountStr, 64); err == nil {
+					if totalPot > 0 {
+						betPct = raiseAmount / totalPot
+						log.Printf("检测到加注行动: r%s，加注金额: %.2f，底池: %.2f，bet_pct: %.3f",
+							raiseAmountStr, raiseAmount, totalPot, betPct)
+					}
+				} else {
+					log.Printf("警告：无法解析加注金额: %s", raiseAmountStr)
+				}
+			} else {
+				log.Printf("未识别的行动类型: %s", lastAction)
+			}
+		} else {
+			log.Printf("nodeId中未找到有效的行动信息: %s", nodeId)
+		}
 	}
 
 	// 计算spr（栈底比）
+	// 使用传入的有效筹码，计算剩余筹码与底池的比例
+	remainingStack := effectiveStack - math.Max(oop, ip)
 	spr := 0.0
-	if pot > 0 {
-		spr = stack / pot
+	if totalPot > 0 && remainingStack > 0 {
+		spr = remainingStack / totalPot
 	}
 
-	log.Printf("计算结果: bet_pct=%.3f, spr=%.3f (pot=%.2f, bet=%.2f, stack=%.2f)",
-		betPct, spr, pot, bet, stack)
+	// 计算筹码深度（后手筹码，两人中筹码量较少的一方）
+	stackDepth := math.Min(effectiveStack-oop, effectiveStack-ip)
 
-	return betPct, spr
+	log.Printf("计算结果: oop=%.2f, ip=%.2f, dead=%.2f, totalPot=%.2f, bet_pct=%.3f, spr=%.3f, stack_depth=%.2f",
+		oop, ip, dead, totalPot, betPct, spr, stackDepth)
+
+	return betPct, spr, stackDepth
 }
 
 // 新增：生成SQL插入语句
@@ -906,11 +1101,11 @@ func generateSQLInsert(record *model.Record, nodePrefix string, betLevel int, bo
 		action2Eq = action2.Eq
 	}
 
-	// 生成INSERT语句
-	sql := fmt.Sprintf("INSERT INTO flop_60bb_co_bb (node_prefix, bet_level, board_id, combo_id, bet_pct, spr, "+
+	// 生成INSERT语句，添加stack_depth字段
+	sql := fmt.Sprintf("INSERT INTO flop_60bb_co_bb (node_prefix, bet_level, board_id, combo_id, stack_depth, bet_pct, spr, "+
 		"action1, freq1, ev1, eq1, action2, freq2, ev2, eq2) VALUES "+
-		"('%s', %d, %d, %d, %.3f, %.3f, '%s', %.3f, %.3f, %.3f, '%s', %.3f, %.3f, %.3f);\n",
-		nodePrefix, betLevel, boardId, comboId, betPct, spr,
+		"('%s', %d, %d, %d, %.3f, %.3f, %.3f, '%s', %.3f, %.3f, %.3f, '%s', %.3f, %.3f, %.3f);\n",
+		nodePrefix, betLevel, boardId, comboId, record.StackDepth, betPct, spr,
 		action1Label, action1Freq, action1Ev, action1Eq,
 		action2Label, action2Freq, action2Ev, action2Eq)
 
@@ -984,6 +1179,39 @@ func standardizeBoard(board string) string {
 	return strings.Join(cards, " ")
 }
 
+// readCfrFiles 读取指定路径下的所有CFR文件
+func readCfrFiles(cfrFolderPath string) ([]string, error) {
+	var cfrFiles []string
+
+	// 读取目录下的所有文件
+	files, err := os.ReadDir(cfrFolderPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取目录失败: %v", err)
+	}
+
+	// 过滤出CFR文件（.cfr文件）
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		fileName := file.Name()
+		if strings.HasSuffix(strings.ToLower(fileName), ".cfr") {
+			fullPath := filepath.Join(cfrFolderPath, fileName)
+			cfrFiles = append(cfrFiles, fullPath)
+		}
+	}
+
+	if len(cfrFiles) == 0 {
+		return nil, fmt.Errorf("在路径 %s 下未找到任何 .cfr 文件", cfrFolderPath)
+	}
+
+	// 按文件名排序，确保处理顺序一致
+	sort.Strings(cfrFiles)
+
+	return cfrFiles, nil
+}
+
 // readScriptFiles 读取指定路径下的所有脚本文件
 func readScriptFiles(scriptPath string) ([]string, error) {
 	var scriptFiles []string
@@ -1035,6 +1263,45 @@ func replaceSetBoard(scriptContent, flop string) string {
 	setBoardRegex := regexp.MustCompile(`(?m)^set_board\s+.*$`)
 	newSetBoard := fmt.Sprintf("set_board %s", flop)
 	return setBoardRegex.ReplaceAllString(scriptContent, newSetBoard)
+}
+
+// checkExistingParseResults 检查data目录中已存在的解析结果文件
+func checkExistingParseResults() (map[string]bool, error) {
+	existingFiles := make(map[string]bool)
+
+	// 检查data目录是否存在
+	if _, err := os.Stat("data"); os.IsNotExist(err) {
+		log.Printf("data目录不存在，将创建新目录")
+		// 创建目录
+		if err := os.MkdirAll("data", 0755); err != nil {
+			return nil, fmt.Errorf("创建data目录失败: %v", err)
+		}
+		return existingFiles, nil
+	}
+
+	// 读取目录中的所有文件
+	files, err := os.ReadDir("data")
+	if err != nil {
+		return nil, fmt.Errorf("读取data目录失败: %v", err)
+	}
+
+	// 统计已存在的.json和.sql文件
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		fileName := file.Name()
+		if strings.HasSuffix(strings.ToLower(fileName), ".json") ||
+			strings.HasSuffix(strings.ToLower(fileName), ".sql") {
+			existingFiles[fileName] = true
+		}
+	}
+
+	log.Printf("检查data目录: %s", "data")
+	log.Printf("发现已存在的解析结果文件: %d 个", len(existingFiles))
+
+	return existingFiles, nil
 }
 
 // checkExistingFiles 检查导出目录中已存在的文件

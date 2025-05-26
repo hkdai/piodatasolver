@@ -21,10 +21,13 @@ type ChildNode struct {
 }
 
 type Record struct {
-	Node     string   `json:"node"`      //节点id
-	Actor    string   `json:"actor"`     //行动方
-	Board    string   `json:"board"`     //公共牌
-	Hand     string   `json:"hand"`      //玩家手牌
-	Actions  []Action `json:"actions"`   //玩家动作
-	PotInfo  string   `json:"pot_info"`  //底池信息
+	Node       string   `json:"node"`        //节点id
+	Actor      string   `json:"actor"`       //行动方
+	Board      string   `json:"board"`       //公共牌
+	Hand       string   `json:"hand"`        //玩家手牌
+	Actions    []Action `json:"actions"`     //玩家动作
+	PotInfo    string   `json:"pot_info"`    //底池信息
+	StackDepth float64  `json:"stack_depth"` //筹码深度（后手筹码）
+	Spr        float64  `json:"spr"`         //栈底比
+	BetPct     float64  `json:"bet_pct"`     //下注占底池比例
 }
