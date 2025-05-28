@@ -14,6 +14,7 @@
 - ✅ **位置判断**：自动识别IP/OOP位置信息
 - ✅ **SQL文件合并**：将多个SQL文件合并为单一文件
 - ✅ **CSV转换**：支持SQL转CSV格式，优化数据库导入性能
+- ✅ **生成JSONL训练数据**：从MySQL数据库中读取GTO策略数据，生成用于大语言模型微调的JSONL格式训练数据
 
 ## 📋 系统要求
 
@@ -78,6 +79,51 @@
 **输出结果**：
 - `csv/` 目录：包含所有CSV文件（每个公牌一个文件）
 - `csv/load_data.sql`：MySQL导入脚本，包含所有LOAD DATA语句
+
+### 5. 生成JSONL训练数据 (jsonl命令)
+
+将数据库中的所有表数据转换为JSONL格式，用于模型微调：
+
+```bash
+piodatasolver.exe jsonl
+```
+
+生成的JSONL格式示例：
+```json
+{
+  "board": "Ts 9d 5c",
+  "hole_cards": "Qc Jd",
+  "player_position": "CO",
+  "opponent_position": "BB",
+  "player_is_oop": false,
+  "spr": 2.8,
+  "board_texture_summary": {
+    "type": "中张",
+    "suitedness": "彩虹",
+    "connectedness": "两张连续",
+    "is_paired": false
+  },
+  "action_history": "OOP 过牌，IP 下注 33 个筹码",
+  "gto_action": "raise",
+  "frequency_pct": 73.2,
+  "ev": 1.05
+}
+```
+
+字段说明：
+| 字段名                  | 含义                                               |
+| ----------------------- | -------------------------------------------------- |
+| `board`                 | 公牌，标准英文表示                                |
+| `hole_cards`            | 手牌，例如 `Qc Jd` 表示梅花Q、方片J              |
+| `player_position`       | 玩家位置                                          |
+| `opponent_position`     | 对手位置                                          |
+| `player_is_oop`         | 玩家是否处于位置劣势（OOP）                      |
+| `spr`                   | 当前决策点的 SPR（Stack to Pot Ratio）           |
+| `board_texture_summary` | 结构化的牌面特征分析                              |
+| `action_history`        | 当前节点之前的行动路径                            |
+| `gto_action`            | GTO 最佳建议动作                                  |
+| `frequency_pct`         | 建议动作的执行频率（百分比）                      |
+| `ev`                    | 当前动作的期望收益值（以BB为单位）               |
 
 ## 📊 数据结构说明
 
@@ -248,6 +294,39 @@ IGNORE 1 ROWS;
 ## 📄 许可证
 
 MIT License
+
+## 🗄️ 数据库表结构要求
+
+jsonl命令需要MySQL数据库中的表包含以下字段：
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| node_prefix | VARCHAR | 节点路径（如：r:0:c:b75） |
+| bet_level | INT | 主动下注次数 |
+| board_id | INT | 公牌ID |
+| combo_id | INT | 手牌ID (0-1325) |
+| combo_str | VARCHAR | 手牌字符串（如：3d3c） |
+| board_str | VARCHAR | 公牌字符串（如：2c 2d 2h） |
+| ip_or_oop | VARCHAR | 位置（IP/OOP） |
+| stack_depth | FLOAT | 筹码深度 |
+| bet_pct | FLOAT | 下注占底池比例 |
+| spr | FLOAT | SPR值 |
+| action1 | VARCHAR | 第一个动作 |
+| freq1 | FLOAT | 第一个动作频率 |
+| ev1 | FLOAT | 第一个动作EV |
+| eq1 | FLOAT | 第一个动作胜率 |
+| action2 | VARCHAR | 第二个动作 |
+| freq2 | FLOAT | 第二个动作频率 |
+| ev2 | FLOAT | 第二个动作EV |
+| eq2 | FLOAT | 第二个动作胜率 |
+
+## 📞 联系方式
+
+如有问题或建议，请提交Issue或Pull Request。
+
+## 📄 许可证
+
+本项目采用MIT许可证。
 
 ---
 

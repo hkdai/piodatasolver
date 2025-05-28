@@ -1,0 +1,24 @@
+# Unsloth - 用于高效微调大模型
+unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git
+
+# 基础依赖
+torch>=2.1.0
+transformers>=4.36.0
+datasets>=2.14.0
+accelerate>=0.24.0
+peft>=0.7.0
+trl>=0.7.4
+bitsandbytes>=0.41.0
+
+# 训练监控
+wandb
+tensorboard
+
+# 数据处理
+pandas
+numpy
+scikit-learn
+
+# 其他工具
+python-dotenv
+tqdm 

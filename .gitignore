@@ -36,6 +36,10 @@ go.work
 # csv数据
 /csv/
 
+# 微调数据文件
+*.jsonl
+*.json
+
 # 忽略data目录下的所有JSON文件
 data/*.json
 data/*.sql

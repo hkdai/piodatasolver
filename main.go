@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,6 +18,8 @@ import (
 	"piodatasolver/internal/upi"
 	"piodatasolver/internal/util"
 	"piodatasolver/model"
+
+	_ "github.com/go-sql-driver/mysql"
 )
 
 var handOrder *cache.HandOrder
@@ -52,7 +55,7 @@ func extractBoardFromTemplate(templateContent string) string {
 func main() {
 	// 检查命令行参数
 	if len(os.Args) < 2 {
-		fmt.Println("用法: piodatasolver.exe [parse|calc|merge|mergecsv] [参数]")
+		fmt.Println("用法: piodatasolver.exe [parse|calc|merge|mergecsv|jsonl] [参数]")
 		fmt.Println("  parse <CFR文件夹路径> - 解析指定文件夹下的所有CFR文件并生成JSON/SQL文件")
 		fmt.Println("    例如: piodatasolver.exe parse \"E:\\zdsbddz\\piosolver\\piosolver3\\saves\"")
 		fmt.Println("  calc <脚本路径> - 执行PioSolver批量计算功能")
@@ -61,6 +64,8 @@ func main() {
 		fmt.Println("    例如: piodatasolver.exe merge")
 		fmt.Println("  mergecsv - 将data目录下的所有SQL文件转换为CSV格式")
 		fmt.Println("    例如: piodatasolver.exe mergecsv")
+		fmt.Println("  jsonl - 将data目录下的所有SQL文件转换为JSONL格式")
+		fmt.Println("    例如: piodatasolver.exe jsonl")
 		os.Exit(1)
 	}
 
@@ -93,10 +98,11 @@ func main() {
 	case "mergecsv":
 		log.Printf("执行SQL转CSV功能")
 		runMergeCSVCommand()
+	case "jsonl":
+		runJSONLCommand()
 	default:
-		fmt.Printf("未知命令: %s\n", command)
-		fmt.Println("支持的命令: parse, calc, merge, mergecsv")
-		os.Exit(1)
+		log.Printf("未知命令: %s", command)
+		log.Println("支持的命令: parse, calc, merge, mergecsv, jsonl")
 	}
 }
 
@@ -2369,4 +2375,1238 @@ func generateLoadDataScriptWithMapping(csvDir string, csvToTableMap map[string]s
 	file.WriteString("-- ========================================\n")
 
 	return nil
+}
+
+// runJSONLCommand 执行JSONL生成功能
+func runJSONLCommand() {
+	log.Println("==================================")
+	log.Println("【JSONL生成功能】正在初始化...")
+	log.Println("==================================")
+
+	// 连接数据库
+	db, err := connectDatabase()
+	if err != nil {
+		log.Fatalf("连接数据库失败: %v", err)
+	}
+	defer db.Close()
+
+	// 获取所有表名
+	tableNames, err := getTableNames(db)
+	if err != nil {
+		log.Fatalf("获取表名失败: %v", err)
+	}
+
+	log.Printf("找到 %d 个表", len(tableNames))
+
+	var allTrainingData []SimpleTrainingData
+	totalRecords := 0
+
+	// 处理每个表
+	for _, tableName := range tableNames {
+		log.Printf("正在处理表: %s", tableName)
+
+		records, err := fetchTableData(db, tableName)
+		if err != nil {
+			log.Printf("获取表 %s 数据失败: %v", tableName, err)
+			continue
+		}
+
+		// 解析位置信息
+		playerPos, opponentPos := parsePositionsFromTableName(tableName)
+
+		// 为每条记录生成训练数据
+		for _, record := range records {
+			// 处理action1
+			if record.Action1 != "" && record.Freq1 > 0 {
+				// 分析手牌特征
+				handFeatures := analyzeHandFeatures(record.ComboStr, record.BoardStr)
+
+				// 计算底池赔率（如果有上一个下注动作）
+				potOdds := 0.0
+				lastActionSize := extractLastActionSize(record.NodePrefix)
+				if lastActionSize > 0 {
+					potOdds = lastActionSize / (100 + lastActionSize)
+				}
+
+				training := SimpleTrainingData{
+					Board:               record.BoardStr,
+					HoleCards:           record.ComboStr,
+					PlayerPosition:      playerPos,
+					OpponentPosition:    opponentPos,
+					PlayerIsOOP:         record.IPOrOOP == "OOP",
+					SPR:                 record.SPR,
+					BoardTextureSummary: analyzeBoardTexture(record.BoardStr),
+					ActionHistory:       parseActionHistory(record.NodePrefix, record.IPOrOOP),
+					GTOAction:           normalizeActionType(record.Action1),
+					FrequencyPct:        record.Freq1 * 100,
+					EV:                  record.EV1,
+					HandFeatures:        handFeatures,
+					Equity:              record.EQ1, // 使用原始的EQ字段
+					PotOdds:             potOdds,
+					StackDepth:          record.StackDepth,
+					BetLevel:            record.BetLevel,
+					BetPct:              record.BetPct, // 使用数据库中的bet_pct
+				}
+				allTrainingData = append(allTrainingData, training)
+			}
+
+			// 处理action2
+			if record.Action2 != "" && record.Freq2 > 0 {
+				// 分析手牌特征
+				handFeatures := analyzeHandFeatures(record.ComboStr, record.BoardStr)
+
+				// 计算底池赔率
+				potOdds := 0.0
+				lastActionSize := extractLastActionSize(record.NodePrefix)
+				if lastActionSize > 0 {
+					potOdds = lastActionSize / (100 + lastActionSize)
+				}
+
+				training := SimpleTrainingData{
+					Board:               record.BoardStr,
+					HoleCards:           record.ComboStr,
+					PlayerPosition:      playerPos,
+					OpponentPosition:    opponentPos,
+					PlayerIsOOP:         record.IPOrOOP == "OOP",
+					SPR:                 record.SPR,
+					BoardTextureSummary: analyzeBoardTexture(record.BoardStr),
+					ActionHistory:       parseActionHistory(record.NodePrefix, record.IPOrOOP),
+					GTOAction:           normalizeActionType(record.Action2),
+					FrequencyPct:        record.Freq2 * 100,
+					EV:                  record.EV2,
+					HandFeatures:        handFeatures,
+					Equity:              record.EQ2, // 使用原始的EQ字段
+					PotOdds:             potOdds,
+					StackDepth:          record.StackDepth,
+					BetLevel:            record.BetLevel,
+					BetPct:              record.BetPct, // 使用数据库中的bet_pct
+				}
+				allTrainingData = append(allTrainingData, training)
+			}
+		}
+
+		totalRecords += len(records)
+		log.Printf("表 %s 处理了 %d 条原始记录", tableName, len(records))
+	}
+
+	// 过滤掉一些无效数据
+	var filteredData []SimpleTrainingData
+	for _, data := range allTrainingData {
+		// 过滤掉频率太低的动作（小于5%）
+		if data.FrequencyPct < 5.0 {
+			continue
+		}
+		// 过滤掉EV异常的数据
+		if math.IsNaN(data.EV) || math.IsInf(data.EV, 0) {
+			continue
+		}
+		filteredData = append(filteredData, data)
+	}
+
+	// 输出JSONL文件
+	err = writeSimpleJSONLFile(filteredData, "train.jsonl")
+	if err != nil {
+		log.Fatalf("写入JSONL文件失败: %v", err)
+	}
+
+	// 生成评估数据集（10%的数据）
+	evalData := splitSimpleEvalData(filteredData, 0.1)
+	err = writeSimpleJSONLFile(evalData, "eval.jsonl")
+	if err != nil {
+		log.Printf("写入评估数据集失败: %v", err)
+	}
+
+	log.Println("==================================")
+	log.Printf("【JSONL生成完成】")
+	log.Printf("✅ 原始记录数: %d", totalRecords)
+	log.Printf("✅ 生成的训练样本: %d", len(allTrainingData))
+	log.Printf("✅ 过滤后的训练样本: %d", len(filteredData))
+	log.Printf("✅ 评估数据: %d 条", len(evalData))
+	log.Printf("✅ 输出文件: train.jsonl, eval.jsonl")
+	log.Println("==================================")
+}
+
+// connectDatabase 连接MySQL数据库
+func connectDatabase() (*sql.DB, error) {
+	// 数据库连接配置 - 使用用户的MySQL数据库
+	// 格式: username:password@tcp(host:port)/database?charset=utf8mb4&parseTime=True&loc=Local
+	dsn := "root:Dhk@0052410@tcp(localhost:3306)/poker?charset=utf8mb4&parseTime=True&loc=Local"
+
+	// 如果有环境变量，优先使用环境变量
+	if envDSN := os.Getenv("MYSQL_DSN"); envDSN != "" {
+		dsn = envDSN
+	}
+
+	log.Printf("正在连接数据库...")
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("打开数据库连接失败: %v", err)
+	}
+
+	err = db.Ping()
+	if err != nil {
+		return nil, fmt.Errorf("数据库连接测试失败: %v", err)
+	}
+
+	log.Printf("数据库连接成功")
+	return db, nil
+}
+
+// getTableNames 获取所有以flop_开头的表名
+func getTableNames(db *sql.DB) ([]string, error) {
+	query := "SHOW TABLES LIKE 'flop_%'"
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tableNames []string
+	for rows.Next() {
+		var tableName string
+		err := rows.Scan(&tableName)
+		if err != nil {
+			return nil, err
+		}
+		tableNames = append(tableNames, tableName)
+	}
+
+	return tableNames, nil
+}
+
+// fetchTableData 获取表中的所有数据
+func fetchTableData(db *sql.DB, tableName string) ([]DBRecord, error) {
+	query := fmt.Sprintf(`
+		SELECT node_prefix, bet_level, board_id, combo_id, combo_str, board_str, 
+		       ip_or_oop, stack_depth, bet_pct, spr,
+		       action1, freq1, ev1, eq1, action2, freq2, ev2, eq2
+		FROM %s
+	`, tableName)
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []DBRecord
+	for rows.Next() {
+		var record DBRecord
+		err := rows.Scan(
+			&record.NodePrefix, &record.BetLevel, &record.BoardID, &record.ComboID,
+			&record.ComboStr, &record.BoardStr, &record.IPOrOOP, &record.StackDepth,
+			&record.BetPct, &record.SPR, &record.Action1, &record.Freq1, &record.EV1,
+			&record.EQ1, &record.Action2, &record.Freq2, &record.EV2, &record.EQ2,
+		)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+
+	return records, nil
+}
+
+// aggregateRecords 聚合记录数据
+func aggregateRecords(records []DBRecord) map[AggregationKey]map[string]*ActionAggregation {
+	aggregated := make(map[AggregationKey]map[string]*ActionAggregation)
+
+	for _, record := range records {
+		key := AggregationKey{
+			NodePrefix: record.NodePrefix,
+			BoardID:    record.BoardID,
+			IPOrOOP:    record.IPOrOOP,
+			StackDepth: record.StackDepth,
+			BetPct:     record.BetPct,
+		}
+
+		if aggregated[key] == nil {
+			aggregated[key] = make(map[string]*ActionAggregation)
+		}
+
+		// 处理action1
+		if record.Action1 != "" && record.Freq1 > 0 {
+			actionKey := record.Action1
+			sizePct := extractSizeFromAction(record.Action1)
+
+			if aggregated[key][actionKey] == nil {
+				aggregated[key][actionKey] = &ActionAggregation{
+					ActionType: normalizeActionType(record.Action1),
+					SizePctPot: sizePct,
+				}
+			}
+
+			agg := aggregated[key][actionKey]
+			agg.TotalFreq += record.Freq1
+			agg.TotalEV += record.EV1 * record.Freq1
+			agg.ComboCount++
+
+			// 添加combo示例
+			if len(agg.ComboExamples) < 3 {
+				note := getComboNote(record.Freq1, record.EV1, record.Action1)
+				agg.ComboExamples = append(agg.ComboExamples, ComboExample{
+					Combo:        record.ComboStr,
+					Action:       record.Action1,
+					FrequencyPct: record.Freq1 * 100,
+					Note:         note,
+				})
+			}
+		}
+
+		// 处理action2
+		if record.Action2 != "" && record.Freq2 > 0 {
+			actionKey := record.Action2
+			sizePct := extractSizeFromAction(record.Action2)
+
+			if aggregated[key][actionKey] == nil {
+				aggregated[key][actionKey] = &ActionAggregation{
+					ActionType: normalizeActionType(record.Action2),
+					SizePctPot: sizePct,
+				}
+			}
+
+			agg := aggregated[key][actionKey]
+			agg.TotalFreq += record.Freq2
+			agg.TotalEV += record.EV2 * record.Freq2
+			agg.ComboCount++
+
+			// 添加combo示例
+			if len(agg.ComboExamples) < 3 {
+				note := getComboNote(record.Freq2, record.EV2, record.Action2)
+				agg.ComboExamples = append(agg.ComboExamples, ComboExample{
+					Combo:        record.ComboStr,
+					Action:       record.Action2,
+					FrequencyPct: record.Freq2 * 100,
+					Note:         note,
+				})
+			}
+		}
+	}
+
+	return aggregated
+}
+
+// convertToTrainingData 将聚合数据转换为训练数据
+func convertToTrainingData(aggregated map[AggregationKey]map[string]*ActionAggregation, tableName string, records []DBRecord) []TrainingData {
+	var trainingData []TrainingData
+
+	// 创建一个映射，用于快速查找board_str和spr
+	boardInfoMap := make(map[int]struct {
+		BoardStr string
+		SPR      float64
+	})
+
+	for _, record := range records {
+		boardInfoMap[record.BoardID] = struct {
+			BoardStr string
+			SPR      float64
+		}{
+			BoardStr: record.BoardStr,
+			SPR:      record.SPR,
+		}
+	}
+
+	for key, actions := range aggregated {
+		// 从boardInfoMap中获取真实的board信息
+		boardInfo, exists := boardInfoMap[key.BoardID]
+		if !exists {
+			continue // 如果找不到board信息，跳过这个节点
+		}
+
+		boardStr := boardInfo.BoardStr
+		spr := boardInfo.SPR
+
+		// 解析位置信息
+		playerPos, opponentPos := parsePositionsFromTableName(tableName)
+
+		// 生成策略分布
+		var strategies []ActionStrategy
+		var totalFreq float64
+		var totalEV float64
+
+		// 先统计总频率
+		for _, actionAgg := range actions {
+			if actionAgg.ComboCount > 0 {
+				totalFreq += actionAgg.TotalFreq
+			}
+		}
+
+		// 计算归一化的频率和平均EV
+		for _, actionAgg := range actions {
+			if actionAgg.ComboCount > 0 && totalFreq > 0 {
+				// 计算该动作在所有动作中的频率占比
+				actionFreqPct := (actionAgg.TotalFreq / totalFreq) * 100
+				// 计算该动作的平均EV
+				avgEV := actionAgg.TotalEV / actionAgg.TotalFreq
+
+				strategies = append(strategies, ActionStrategy{
+					ActionType:   actionAgg.ActionType,
+					SizePctPot:   actionAgg.SizePctPot,
+					FrequencyPct: actionFreqPct,
+					AverageEVBB:  avgEV,
+				})
+
+				totalEV += avgEV * (actionAgg.TotalFreq / totalFreq)
+			}
+		}
+
+		// 收集代表性combo示例
+		var comboExamples []ComboExample
+		for _, actionAgg := range actions {
+			comboExamples = append(comboExamples, actionAgg.ComboExamples...)
+		}
+
+		// 限制combo示例数量
+		if len(comboExamples) > 6 {
+			comboExamples = comboExamples[:6]
+		}
+
+		// 生成训练数据
+		training := TrainingData{
+			Instruction: "你是一名德州扑克 GTO 策略助手。根据当前的牌局状态（翻牌圈），请为该位置玩家提供最优的 GTO 行动策略建议。",
+			Input: InputData{
+				GameStage:                      "翻牌圈",
+				Board:                          boardStr,
+				PlayerPosition:                 playerPos,
+				OpponentPosition:               opponentPos,
+				PlayerIsOOP:                    key.IPOrOOP == "OOP",
+				CurrentNodeActionHistoryOnFlop: parseActionHistory(key.NodePrefix, key.IPOrOOP),
+				SPRAtDecisionPoint:             spr,
+				BoardTextureSummary:            analyzeBoardTexture(boardStr),
+			},
+			Output: OutputData{
+				GTOStrategyDistribution:     strategies,
+				RepresentativeComboExamples: comboExamples,
+				OverallNodeEVBB:             totalEV,
+			},
+		}
+
+		trainingData = append(trainingData, training)
+	}
+
+	return trainingData
+}
+
+// 辅助函数
+func extractSizeFromAction(action string) float64 {
+	// 从动作字符串中提取下注的筹码数量
+	// 注意：这里提取的是实际的筹码数，不是百分比
+	// 例如：
+	// - "bet75" -> 75 (表示下注75个筹码)
+	// - "raise150" -> 150 (表示加注到150个筹码)
+	// - "bet100" -> 100 (表示下注100个筹码)
+	// 这个值仅用于展示动作的大小，实际的下注占底池比例(bet_pct)在calculateBetMetrics中计算
+	re := regexp.MustCompile(`(\d+)`)
+	matches := re.FindStringSubmatch(action)
+	if len(matches) > 1 {
+		if size, err := strconv.ParseFloat(matches[1], 64); err == nil {
+			return size
+		}
+	}
+	return 0
+}
+
+func normalizeActionType(action string) string {
+	action = strings.ToLower(action)
+	if strings.Contains(action, "bet") || strings.Contains(action, "raise") {
+		return "raise"
+	} else if strings.Contains(action, "call") {
+		return "call"
+	} else if strings.Contains(action, "check") {
+		return "check"
+	} else if strings.Contains(action, "fold") {
+		return "fold"
+	}
+	return action
+}
+
+func getComboNote(freq float64, ev float64, action string) string {
+	// 特殊处理fold动作
+	if strings.ToLower(action) == "fold" || strings.Contains(strings.ToLower(action), "fold") {
+		if freq >= 0.8 {
+			return "高频 弃牌"
+		} else if freq >= 0.5 {
+			return "中频 弃牌"
+		} else {
+			return "低频 弃牌"
+		}
+	}
+
+	// 根据频率和EV综合判断
+	if freq >= 0.8 {
+		if ev >= 1.0 {
+			return "高频 价值"
+		} else if ev >= -0.5 {
+			return "高频 平衡"
+		} else {
+			return "高频 诈唬"
+		}
+	} else if freq >= 0.5 {
+		if ev >= 0.5 {
+			return "中频 价值"
+		} else {
+			return "中频 混合"
+		}
+	} else if freq >= 0.2 {
+		if ev >= 0 {
+			return "低频 价值"
+		} else {
+			return "低频 诈唬"
+		}
+	} else {
+		// 频率小于20%
+		if ev >= 0 {
+			return "偶尔 价值"
+		} else {
+			return "偶尔 诈唬"
+		}
+	}
+}
+
+func parsePositionsFromTableName(tableName string) (string, string) {
+	// 位置优先级表（数字越小，位置越靠前，越容易是OOP）
+	positionPriority := map[string]int{
+		"sb":  0,
+		"bb":  1,
+		"utg": 2,
+		"mp":  3,
+		"co":  4,
+		"btn": 5,
+		"bu":  5, // btn的别名
+	}
+
+	// 从表名解析位置信息，如 flop_40bb_co_bb -> BB, CO
+	parts := strings.Split(tableName, "_")
+	if len(parts) >= 4 {
+		// 提取两个位置
+		pos1 := strings.ToLower(parts[2])
+		pos2 := strings.ToLower(parts[3])
+
+		// 获取优先级
+		priority1, ok1 := positionPriority[pos1]
+		priority2, ok2 := positionPriority[pos2]
+
+		// 如果两个位置都有效
+		if ok1 && ok2 {
+			// 优先级小的是OOP（位置靠前），返回格式为 (玩家位置, 对手位置)
+			// 通常数据库中是以后位玩家视角（如CO vs BB中，CO是玩家）
+			if priority1 > priority2 {
+				// pos1优先级更大（位置更靠后），所以pos1是玩家（IP）
+				return strings.ToUpper(pos1), strings.ToUpper(pos2)
+			} else {
+				// pos2优先级更大（位置更靠后），所以pos2是玩家（通常是OOP）
+				return strings.ToUpper(pos2), strings.ToUpper(pos1)
+			}
+		}
+
+		// 如果无法识别，尝试返回原始值
+		return strings.ToUpper(pos2), strings.ToUpper(pos1)
+	}
+
+	// 默认值
+	return "BB", "CO"
+}
+
+func parseActionHistory(nodePrefix, ipOrOop string) string {
+	// 解析节点前缀生成动作历史描述
+	if nodePrefix == "r:0" {
+		return "游戏开始"
+	}
+
+	// 移除 "r:0:" 前缀
+	if strings.HasPrefix(nodePrefix, "r:0:") {
+		nodePrefix = strings.TrimPrefix(nodePrefix, "r:0:")
+	}
+
+	// 分割动作序列
+	actions := strings.Split(nodePrefix, ":")
+	if len(actions) == 0 {
+		return "游戏开始"
+	}
+
+	// 构建动作历史描述
+	history := []string{}
+
+	// 根据当前节点的IPOrOOP判断第一个行动者
+	// 如果当前是IP决策，说明之前的行动序列最后是OOP行动，所以第一个行动者是OOP
+	// 如果当前是OOP决策，说明之前的行动序列最后是IP行动，所以第一个行动者也是OOP（翻牌圈总是OOP先行动）
+	currentPosition := "OOP" // 翻牌圈第一个行动者总是OOP
+
+	for _, action := range actions {
+		if action == "" {
+			continue
+		}
+
+		actionDesc := ""
+		if action == "c" {
+			actionDesc = fmt.Sprintf("%s 过牌", currentPosition)
+		} else if action == "f" {
+			actionDesc = fmt.Sprintf("%s 弃牌", currentPosition)
+		} else if strings.HasPrefix(action, "b") {
+			// 提取下注大小
+			betSize := strings.TrimPrefix(action, "b")
+			if betSize != "" {
+				actionDesc = fmt.Sprintf("%s 下注 %s 个筹码", currentPosition, betSize)
+			} else {
+				actionDesc = fmt.Sprintf("%s 下注", currentPosition)
+			}
+		} else if strings.HasPrefix(action, "r") {
+			// 提取加注大小
+			raiseSize := strings.TrimPrefix(action, "r")
+			if raiseSize != "" {
+				actionDesc = fmt.Sprintf("%s 加注到 %s 个筹码", currentPosition, raiseSize)
+			} else {
+				actionDesc = fmt.Sprintf("%s 加注", currentPosition)
+			}
+		} else {
+			// 数字通常表示下注/加注大小（在convertNodePath后的格式）
+			actionDesc = fmt.Sprintf("%s 下注 %s 个筹码", currentPosition, action)
+		}
+
+		if actionDesc != "" {
+			history = append(history, actionDesc)
+			// 切换位置
+			if currentPosition == "OOP" {
+				currentPosition = "IP"
+			} else {
+				currentPosition = "OOP"
+			}
+		}
+	}
+
+	if len(history) == 0 {
+		return "游戏开始"
+	}
+
+	return strings.Join(history, "，")
+}
+
+// parseCard 解析单张牌，返回牌面值和花色
+func parseCard(card string) (rank string, suit string) {
+	card = strings.TrimSpace(card)
+	if len(card) < 2 {
+		return "", ""
+	}
+
+	// 处理标准格式（如 As, Kh, Td）
+	if len(card) == 2 {
+		return card[:1], card[1:]
+	}
+
+	// 处理10的特殊情况（如 10s, 10h）
+	if len(card) == 3 && card[:2] == "10" {
+		return "T", card[2:]
+	}
+
+	// 其他情况返回空
+	return "", ""
+}
+
+func analyzeBoardTexture(boardStr string) BoardTexture {
+	// 分析牌面结构
+	cards := strings.Fields(strings.TrimSpace(boardStr))
+
+	texture := BoardTexture{
+		Type:          "低张",
+		Suitedness:    "彩虹",
+		Connectedness: "无顺子听牌",
+		IsPaired:      false,
+	}
+
+	if len(cards) >= 3 {
+		// 解析每张牌的点数和花色
+		ranks := make(map[string]int)
+		suits := make(map[string]int)
+		rankValues := []int{}
+
+		for _, card := range cards {
+			rank, suit := parseCard(card)
+			if rank != "" && suit != "" {
+				ranks[rank]++
+				suits[suit]++
+
+				// 转换牌面值
+				rankValue := getRankValue(rank)
+				rankValues = append(rankValues, rankValue)
+			}
+		}
+
+		// 排序牌面值
+		sort.Sort(sort.Reverse(sort.IntSlice(rankValues)))
+
+		// 先检查配对情况
+		maxRankCount := 0
+		for _, count := range ranks {
+			if count > maxRankCount {
+				maxRankCount = count
+			}
+		}
+
+		// 优先判断三条和对子
+		if maxRankCount == 3 {
+			texture.Type = "三条"
+			texture.IsPaired = true
+		} else if maxRankCount == 2 {
+			texture.IsPaired = true
+			// 对子情况下，再判断高中低张
+			highestRank := rankValues[0]
+			if highestRank >= 12 { // Q或更高
+				texture.Type = "高张对子"
+			} else if highestRank >= 9 { // 9-J
+				texture.Type = "中张对子"
+			} else {
+				texture.Type = "低张对子"
+			}
+		} else {
+			// 无对子情况，判断高中低张
+			highestRank := rankValues[0]
+			if highestRank >= 12 { // Q或更高
+				texture.Type = "高张"
+			} else if highestRank >= 9 { // 9-J
+				texture.Type = "中张"
+			} else {
+				texture.Type = "低张"
+			}
+
+			// 特殊情况：如果有A但是轮牌（A-2-3等），仍然算作低张结构
+			if len(rankValues) >= 3 && rankValues[0] == 14 && rankValues[1] <= 5 {
+				texture.Type = "低张轮牌"
+			}
+		}
+
+		// 检查花色
+		maxSuitCount := 0
+		for _, count := range suits {
+			if count > maxSuitCount {
+				maxSuitCount = count
+			}
+		}
+
+		if maxSuitCount == 3 {
+			texture.Suitedness = "三同花"
+		} else if maxSuitCount == 2 {
+			texture.Suitedness = "两张同花"
+		} else {
+			texture.Suitedness = "彩虹"
+		}
+
+		// 检查顺子结构
+		if len(rankValues) >= 3 {
+			// 检查是否有顺子或顺子听牌
+			connectedness := checkConnectedness(rankValues)
+			texture.Connectedness = connectedness
+		}
+	}
+
+	return texture
+}
+
+// getRankValue 将牌面转换为数值
+func getRankValue(rank string) int {
+	switch rank {
+	case "A":
+		return 14
+	case "K":
+		return 13
+	case "Q":
+		return 12
+	case "J":
+		return 11
+	case "T":
+		return 10
+	default:
+		if val, err := strconv.Atoi(rank); err == nil {
+			return val
+		}
+		return 0
+	}
+}
+
+// checkConnectedness 检查牌面的连续性
+func checkConnectedness(ranks []int) string {
+	if len(ranks) < 3 {
+		return "无顺子听牌"
+	}
+
+	// 检查三张连续（如J-T-9）
+	if ranks[0]-ranks[1] == 1 && ranks[1]-ranks[2] == 1 {
+		return "三张连续"
+	}
+
+	// 检查强顺子听牌（一个间隔，如J-T-8 或 J-9-8）
+	gap1 := ranks[0] - ranks[1]
+	gap2 := ranks[1] - ranks[2]
+	totalGap := ranks[0] - ranks[2]
+
+	// 强顺子听牌：总间隔为3且有一个间隔为1或2
+	if totalGap == 3 && (gap1 <= 2 || gap2 <= 2) {
+		return "强顺子听牌"
+	}
+
+	// 检查两张连续（需要确保不是已经判断过的情况）
+	if gap1 == 1 || gap2 == 1 {
+		return "两张连续"
+	}
+
+	// 弱顺子听牌（总间隔4或更少，但不满足上述条件）
+	if totalGap <= 4 {
+		return "弱顺子听牌"
+	}
+
+	// 特殊情况：A可以和小牌组成顺子（A-2-3-4-5）
+	if ranks[0] == 14 && ranks[len(ranks)-1] <= 5 {
+		// 检查是否有轮牌顺子结构
+		smallCards := []int{}
+		hasAce := false
+		for _, r := range ranks {
+			if r == 14 {
+				hasAce = true
+			} else if r <= 5 {
+				smallCards = append(smallCards, r)
+			}
+		}
+		if hasAce && len(smallCards) >= 2 {
+			// 检查小牌之间的连续性
+			if len(smallCards) >= 2 && smallCards[0]-smallCards[1] <= 2 {
+				return "轮牌顺子听牌"
+			}
+		}
+	}
+
+	return "无顺子听牌"
+}
+
+func writeSimpleJSONLFile(data []SimpleTrainingData, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	for _, item := range data {
+		err := encoder.Encode(item)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func splitSimpleEvalData(data []SimpleTrainingData, ratio float64) []SimpleTrainingData {
+	evalSize := int(float64(len(data)) * ratio)
+	if evalSize == 0 {
+		return []SimpleTrainingData{}
+	}
+
+	// 简单的随机分割，实际可以使用更好的随机化方法
+	return data[:evalSize]
+}
+
+// JSONL训练数据相关结构体
+type BoardTexture struct {
+	Type          string `json:"type"`
+	Suitedness    string `json:"suitedness"`
+	Connectedness string `json:"connectedness"`
+	IsPaired      bool   `json:"is_paired"`
+}
+
+type InputData struct {
+	GameStage                      string       `json:"game_stage"`
+	Board                          string       `json:"board"`
+	PlayerPosition                 string       `json:"player_position"`
+	OpponentPosition               string       `json:"opponent_position"`
+	PlayerIsOOP                    bool         `json:"player_is_oop"`
+	CurrentNodeActionHistoryOnFlop string       `json:"current_node_action_history_on_flop"`
+	SPRAtDecisionPoint             float64      `json:"spr_at_decision_point"`
+	BoardTextureSummary            BoardTexture `json:"board_texture_summary"`
+}
+
+type ActionStrategy struct {
+	ActionType   string  `json:"action_type"`
+	SizePctPot   float64 `json:"size_pct_pot,omitempty"`
+	FrequencyPct float64 `json:"frequency_pct"`
+	AverageEVBB  float64 `json:"average_ev_bb"`
+}
+
+type ComboExample struct {
+	Combo        string  `json:"combo"`
+	Action       string  `json:"action"`
+	FrequencyPct float64 `json:"frequency_pct"`
+	Note         string  `json:"note"`
+}
+
+type OutputData struct {
+	GTOStrategyDistribution     []ActionStrategy `json:"gto_strategy_distribution"`
+	RepresentativeComboExamples []ComboExample   `json:"representative_combo_examples"`
+	OverallNodeEVBB             float64          `json:"overall_node_ev_bb"`
+}
+
+type TrainingData struct {
+	Instruction string     `json:"instruction"`
+	Input       InputData  `json:"input"`
+	Output      OutputData `json:"output"`
+}
+
+// 数据库记录结构体
+type DBRecord struct {
+	NodePrefix string  `json:"node_prefix"`
+	BetLevel   int     `json:"bet_level"`
+	BoardID    int     `json:"board_id"`
+	ComboID    int     `json:"combo_id"`
+	ComboStr   string  `json:"combo_str"`
+	BoardStr   string  `json:"board_str"`
+	IPOrOOP    string  `json:"ip_or_oop"`
+	StackDepth float64 `json:"stack_depth"`
+	BetPct     float64 `json:"bet_pct"`
+	SPR        float64 `json:"spr"`
+	Action1    string  `json:"action1"`
+	Freq1      float64 `json:"freq1"`
+	EV1        float64 `json:"ev1"`
+	EQ1        float64 `json:"eq1"`
+	Action2    string  `json:"action2"`
+	Freq2      float64 `json:"freq2"`
+	EV2        float64 `json:"ev2"`
+	EQ2        float64 `json:"eq2"`
+}
+
+// 聚合键结构体
+type AggregationKey struct {
+	NodePrefix string
+	BoardID    int
+	IPOrOOP    string
+	StackDepth float64
+	BetPct     float64
+}
+
+// 动作聚合数据
+type ActionAggregation struct {
+	ActionType    string
+	SizePctPot    float64
+	TotalFreq     float64
+	TotalEV       float64
+	ComboCount    int
+	ComboExamples []ComboExample
+}
+
+// 简化的训练数据结构，每个手牌一个样本
+type SimpleTrainingData struct {
+	Board               string       `json:"board"`
+	HoleCards           string       `json:"hole_cards"`
+	PlayerPosition      string       `json:"player_position"`
+	OpponentPosition    string       `json:"opponent_position"`
+	PlayerIsOOP         bool         `json:"player_is_oop"`
+	SPR                 float64      `json:"spr"`
+	BoardTextureSummary BoardTexture `json:"board_texture_summary"`
+	ActionHistory       string       `json:"action_history"`
+	GTOAction           string       `json:"gto_action"`
+	FrequencyPct        float64      `json:"frequency_pct"`
+	EV                  float64      `json:"ev"`
+
+	// 新增字段，提高泛化能力
+	HandFeatures HandFeatures `json:"hand_features"` // 手牌特征
+	Equity       float64      `json:"equity"`        // 手牌胜率（原EQ字段）
+	PotOdds      float64      `json:"pot_odds"`      // 底池赔率（面对下注时需要的赔率）
+	StackDepth   float64      `json:"stack_depth"`   // 有效筹码深度
+	BetLevel     int          `json:"bet_level"`     // 当前下注轮次
+	BetPct       float64      `json:"bet_pct"`       // 最近下注占底池比例
+}
+
+// 手牌特征结构体
+type HandFeatures struct {
+	IsPair            bool   `json:"is_pair"`             // 是否口袋对
+	IsSuited          bool   `json:"is_suited"`           // 是否同花
+	IsConnected       bool   `json:"is_connected"`        // 是否顺连张（间隔0）
+	IsSemiConnected   bool   `json:"is_semi_connected"`   // 是否半连张（间隔1-2）
+	HighCardRank      int    `json:"high_card_rank"`      // 最大牌点数(2-14)
+	LowCardRank       int    `json:"low_card_rank"`       // 最小牌点数(2-14)
+	Gap               int    `json:"gap"`                 // 间隔数
+	HandCategory      string `json:"hand_category"`       // 手牌分类：premium/strong/medium/weak
+	HandStrengthScore int    `json:"hand_strength_score"` // 手牌强度数值：4=premium, 3=strong, 2=medium, 1=weak
+	ConnectorType     string `json:"connector_type"`      // 连接类型：connected/one_gap/two_gap/none
+	HasStraightDraw   bool   `json:"has_straight_draw"`   // 是否有顺子听牌
+	HasFlushDraw      bool   `json:"has_flush_draw"`      // 是否有同花听牌
+	MadeHandType      string `json:"made_hand_type"`      // 成牌类型：high_card/pair/two_pair/set/straight/flush等
+}
+
+// analyzeHandFeatures 分析手牌特征
+func analyzeHandFeatures(handStr string, boardStr string) HandFeatures {
+	features := HandFeatures{}
+
+	// 解析手牌（格式如 "AhKs" 或 "Ah Ks"）
+	handStr = strings.ReplaceAll(handStr, " ", "")
+	if len(handStr) < 4 {
+		return features
+	}
+
+	// 提取两张牌
+	card1 := handStr[:2]
+	card2 := handStr[2:4]
+
+	rank1, suit1 := parseCard(card1)
+	rank2, suit2 := parseCard(card2)
+
+	// 获取牌面值
+	rankValue1 := getRankValue(rank1)
+	rankValue2 := getRankValue(rank2)
+
+	// 设置高低牌
+	if rankValue1 >= rankValue2 {
+		features.HighCardRank = rankValue1
+		features.LowCardRank = rankValue2
+	} else {
+		features.HighCardRank = rankValue2
+		features.LowCardRank = rankValue1
+	}
+
+	// 判断是否口袋对
+	features.IsPair = (rankValue1 == rankValue2)
+
+	// 判断是否同花
+	features.IsSuited = (suit1 == suit2)
+
+	// 计算间隔
+	features.Gap = features.HighCardRank - features.LowCardRank - 1
+	if features.Gap < 0 {
+		features.Gap = 0
+	}
+
+	// 判断连接类型
+	if features.IsPair {
+		features.ConnectorType = "pair"
+		features.IsConnected = false
+		features.IsSemiConnected = false
+	} else if features.Gap == 0 {
+		features.ConnectorType = "connected"
+		features.IsConnected = true
+		features.IsSemiConnected = false
+	} else if features.Gap == 1 {
+		features.ConnectorType = "one_gap"
+		features.IsConnected = false
+		features.IsSemiConnected = true
+	} else if features.Gap == 2 {
+		features.ConnectorType = "two_gap"
+		features.IsConnected = false
+		features.IsSemiConnected = true
+	} else {
+		features.ConnectorType = "none"
+		features.IsConnected = false
+		features.IsSemiConnected = false
+	}
+
+	// 手牌分类
+	features.HandCategory = classifyHand(features.HighCardRank, features.LowCardRank, features.IsPair, features.IsSuited)
+
+	// 设置数值评分
+	switch features.HandCategory {
+	case "premium":
+		features.HandStrengthScore = 4
+	case "strong":
+		features.HandStrengthScore = 3
+	case "medium":
+		features.HandStrengthScore = 2
+	case "weak":
+		features.HandStrengthScore = 1
+	default:
+		features.HandStrengthScore = 1
+	}
+
+	// 分析在当前牌面的听牌和成牌情况
+	if boardStr != "" {
+		features.HasStraightDraw = checkStraightDraw(handStr, boardStr)
+		features.HasFlushDraw = checkFlushDraw(handStr, boardStr)
+		features.MadeHandType = evaluateMadeHand(handStr, boardStr)
+	}
+
+	return features
+}
+
+// classifyHand 对手牌进行分类
+func classifyHand(highRank, lowRank int, isPair, isSuited bool) string {
+	// AA, KK, QQ, AKs
+	if isPair && highRank >= 12 { // QQ+
+		return "premium"
+	}
+	if highRank == 14 && lowRank == 13 && isSuited { // AKs
+		return "premium"
+	}
+
+	// JJ, TT, 99, AK, AQs, AJs, KQs
+	if isPair && highRank >= 9 { // 99+
+		return "strong"
+	}
+	if highRank == 14 && lowRank >= 12 { // AQ+
+		return "strong"
+	}
+	if highRank == 14 && lowRank == 11 && isSuited { // AJs
+		return "strong"
+	}
+	if highRank == 13 && lowRank == 12 && isSuited { // KQs
+		return "strong"
+	}
+
+	// 中等牌力：中小对子、同花连张、Ax
+	if isPair && highRank >= 6 { // 66+
+		return "medium"
+	}
+	if highRank == 14 { // Any Ax
+		return "medium"
+	}
+	if isSuited && (highRank-lowRank) <= 2 && highRank >= 9 { // 同花连张或间隔张
+		return "medium"
+	}
+
+	// 其他都是弱牌
+	return "weak"
+}
+
+// checkStraightDraw 检查是否有顺子听牌
+func checkStraightDraw(handStr, boardStr string) bool {
+	// 简化实现：检查是否有4张牌能组成顺子
+	// 实际实现需要更复杂的逻辑
+	allCards := handStr + strings.ReplaceAll(boardStr, " ", "")
+
+	// 提取所有牌的点数
+	ranks := make(map[int]bool)
+	for i := 0; i < len(allCards); i += 2 {
+		if i+1 < len(allCards) {
+			rank, _ := parseCard(allCards[i : i+2])
+			rankValue := getRankValue(rank)
+			ranks[rankValue] = true
+		}
+	}
+
+	// 检查是否有4张连续或接近连续的牌
+	for start := 14; start >= 5; start-- {
+		count := 0
+		for i := 0; i < 5; i++ {
+			if ranks[start-i] || (start-i == 1 && ranks[14]) { // A可以当1用
+				count++
+			}
+		}
+		if count >= 4 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// checkFlushDraw 检查是否有同花听牌
+func checkFlushDraw(handStr, boardStr string) bool {
+	// 统计各花色数量
+	suits := make(map[string]int)
+
+	// 统计手牌花色
+	handStr = strings.ReplaceAll(handStr, " ", "")
+	for i := 0; i < len(handStr); i += 2 {
+		if i+1 < len(handStr) {
+			_, suit := parseCard(handStr[i : i+2])
+			suits[suit]++
+		}
+	}
+
+	// 统计公牌花色
+	cards := strings.Fields(boardStr)
+	for _, card := range cards {
+		_, suit := parseCard(card)
+		suits[suit]++
+	}
+
+	// 检查是否有4张同花
+	for _, count := range suits {
+		if count >= 4 {
+			return true
+		}
+	}
+
+	return false
+}
+
+// evaluateMadeHand 评估成牌类型
+func evaluateMadeHand(handStr, boardStr string) string {
+	// 简化实现，实际需要完整的牌力评估算法
+	handStr = strings.ReplaceAll(handStr, " ", "")
+	rank1, _ := parseCard(handStr[:2])
+	rank2, _ := parseCard(handStr[2:4])
+
+	// 检查是否成对
+	boardRanks := make(map[string]int)
+	cards := strings.Fields(boardStr)
+	for _, card := range cards {
+		rank, _ := parseCard(card)
+		boardRanks[rank]++
+	}
+
+	// 检查三条
+	if boardRanks[rank1] == 2 || boardRanks[rank2] == 2 {
+		return "set"
+	}
+
+	// 检查两对
+	pairCount := 0
+	if rank1 == rank2 {
+		pairCount++
+	}
+	if boardRanks[rank1] == 1 {
+		pairCount++
+	}
+	if boardRanks[rank2] == 1 && rank1 != rank2 {
+		pairCount++
+	}
+
+	if pairCount >= 2 {
+		return "two_pair"
+	}
+
+	// 检查一对
+	if pairCount == 1 || boardRanks[rank1] == 1 || boardRanks[rank2] == 1 {
+		return "pair"
+	}
+
+	// TODO: 检查顺子、同花等
+
+	return "high_card"
+}
+
+// extractLastActionSize 从节点路径中提取最后一个动作的大小（占底池百分比）
+func extractLastActionSize(nodePrefix string) float64 {
+	// 移除 "r:0:" 前缀
+	if strings.HasPrefix(nodePrefix, "r:0:") {
+		nodePrefix = strings.TrimPrefix(nodePrefix, "r:0:")
+	}
+
+	// 分割动作序列
+	actions := strings.Split(nodePrefix, ":")
+	if len(actions) == 0 {
+		return 0
+	}
+
+	// 从后往前查找最后一个下注/加注动作
+	for i := len(actions) - 1; i >= 0; i-- {
+		action := actions[i]
+		if strings.HasPrefix(action, "b") || strings.HasPrefix(action, "r") {
+			// 提取数字
+			sizeStr := strings.TrimPrefix(action, "b")
+			sizeStr = strings.TrimPrefix(sizeStr, "r")
+			if size, err := strconv.ParseFloat(sizeStr, 64); err == nil {
+				// TODO: 这里需要计算实际的底池大小来得到准确的百分比
+				// 目前简化处理，假设是标准下注大小
+				if size <= 33 {
+					return 33.0 // 33% pot
+				} else if size <= 50 {
+					return 50.0 // 50% pot
+				} else if size <= 75 {
+					return 75.0 // 75% pot
+				} else if size <= 100 {
+					return 100.0 // 100% pot
+				} else {
+					return 150.0 // 150% pot
+				}
+			}
+		}
+	}
+
+	return 0
 }
