@@ -33,6 +33,9 @@ go.work
 /tmp/
 /temp/
 
+# csv数据
+/csv/
+
 # 忽略data目录下的所有JSON文件
 data/*.json
 data/*.sql

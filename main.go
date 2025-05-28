@@ -52,11 +52,15 @@ func extractBoardFromTemplate(templateContent string) string {
 func main() {
 	// 检查命令行参数
 	if len(os.Args) < 2 {
-		fmt.Println("用法: piodatasolver.exe [parse|calc] [参数]")
+		fmt.Println("用法: piodatasolver.exe [parse|calc|merge|mergecsv] [参数]")
 		fmt.Println("  parse <CFR文件夹路径> - 解析指定文件夹下的所有CFR文件并生成JSON/SQL文件")
 		fmt.Println("    例如: piodatasolver.exe parse \"E:\\zdsbddz\\piosolver\\piosolver3\\saves\"")
 		fmt.Println("  calc <脚本路径> - 执行PioSolver批量计算功能")
 		fmt.Println("    例如: piodatasolver.exe calc \"D:\\gto\\piosolver3\\TreeBuilding\\mtt\\40bb\"")
+		fmt.Println("  merge - 汇总data目录下的所有SQL文件为data.sql")
+		fmt.Println("    例如: piodatasolver.exe merge")
+		fmt.Println("  mergecsv - 将data目录下的所有SQL文件转换为CSV格式")
+		fmt.Println("    例如: piodatasolver.exe mergecsv")
 		os.Exit(1)
 	}
 
@@ -83,9 +87,15 @@ func main() {
 		scriptPath := os.Args[2]
 		log.Printf("执行计算功能，脚本路径: %s", scriptPath)
 		runCalcCommand(scriptPath)
+	case "merge":
+		log.Printf("执行SQL文件汇总功能")
+		runMergeCommand()
+	case "mergecsv":
+		log.Printf("执行SQL转CSV功能")
+		runMergeCSVCommand()
 	default:
 		fmt.Printf("未知命令: %s\n", command)
-		fmt.Println("支持的命令: parse, calc")
+		fmt.Println("支持的命令: parse, calc, merge, mergecsv")
 		os.Exit(1)
 	}
 }
@@ -581,21 +591,46 @@ func parseNode(client *upi.Client, node string, effectiveStack float64) {
 	// 计算当前节点的bet_pct、spr和stack_depth
 	betPct, spr, stackDepth := calculateBetMetrics(pot, node, effectiveStack)
 
+	// 计算策略执行者（IP或OOP）
+	ipOrOop := calculateIpOrOop(node)
+
+	// 计算主动下注次数（在convertNodePath之前计算，因为convertNodePath会移除b和r前缀）
+	betLevel := calculateBetLevel(node)
+
 	// 创建一个映射，存储每个手牌的Record
 	handRecords := make(map[string]*model.Record)
 
 	// 先为每个手牌创建一个Record
 	for _, hand := range handCards {
+		// 计算手牌的combo_id
+		comboId, ok := handOrder.Index(hand)
+		if !ok {
+			log.Printf("警告：无法找到手牌 %s 的索引", hand)
+			comboId = -1 // 设置为-1表示未找到
+		}
+
+		// 标准化公牌并计算board_id
+		standardizedBoard := standardizeBoard(board)
+		boardId, ok := boardOrder.Index(standardizedBoard)
+		if !ok {
+			log.Printf("警告：无法找到公牌 %s (标准化后: %s) 的索引", board, standardizedBoard)
+			boardId = -1 // 设置为-1表示未找到
+		}
+
 		handRecords[hand] = &model.Record{
 			Node:       node,
 			Actor:      actor,
 			Board:      board,
+			BoardId:    boardId, // 设置公牌ID
 			Hand:       hand,
+			ComboId:    comboId,          // 设置手牌ID
 			Actions:    []model.Action{}, // 初始化空的Actions数组
 			PotInfo:    pot,              // 设置底池信息
 			StackDepth: stackDepth,       // 设置筹码深度
 			Spr:        spr,              // 设置栈底比
 			BetPct:     betPct,           // 设置下注比例
+			IpOrOop:    ipOrOop,          // 设置策略执行者
+			BetLevel:   betLevel,         // 设置主动下注次数
 		}
 	}
 
@@ -889,6 +924,10 @@ func parseNode(client *upi.Client, node string, effectiveStack float64) {
 		// 为当前节点的所有记录生成SQL插入语句
 		log.Printf("开始生成SQL语句，当前节点记录数: %d", len(finalRecords))
 
+		// 从CFR文件路径提取文件名并生成表名
+		_, cfrFileName = filepath.Split(cfrFilePath)
+		tableName := generateTableName(cfrFileName)
+
 		// 统计变量
 		var (
 			totalProcessed   = 0
@@ -903,19 +942,11 @@ func parseNode(client *upi.Client, node string, effectiveStack float64) {
 
 			// 转换节点路径为标准格式
 			nodePrefix := convertNodePath(record.Node)
-			betLevel := calculateBetLevel(nodePrefix)
+			// 使用Record中已计算的BetLevel，而不是重新计算
+			betLevel := record.BetLevel
 
-			// 标准化公牌顺序并获取board_id
-			standardizedBoard := standardizeBoard(record.Board)
-			boardId, ok := boardOrder.Index(standardizedBoard)
-			if !ok {
-				boardIndexFailed++
-				log.Printf("警告：无法找到公牌 %s (标准化后: %s) 的索引", record.Board, standardizedBoard)
-				continue
-			}
-
-			// 生成SQL插入语句（使用Record中已计算的值）
-			sqlInsert := generateSQLInsert(record, nodePrefix, betLevel, boardId, record.Hand, record.BetPct, record.Spr)
+			// 生成SQL插入语句（使用Record中已计算的值和动态表名）
+			sqlInsert := generateSQLInsert(record, nodePrefix, betLevel, tableName)
 			if sqlInsert != "" {
 				sqlGenerated++
 				if _, err := sqlFile.WriteString(sqlInsert); err != nil {
@@ -967,10 +998,52 @@ func convertNodePath(path string) string {
 	return re.ReplaceAllString(path, "${1}")
 }
 
-// 新增：计算下注次数
+// 新增：计算下注次数（主动下注行为）
 func calculateBetLevel(nodePath string) int {
-	// 统计路径中的b（bet）的次数
-	return strings.Count(nodePath, "b")
+	// 移除固定前缀 "r:0"
+	if !strings.HasPrefix(nodePath, "r:0") {
+		return 0
+	}
+
+	// 去掉 "r:0" 前缀
+	remaining := strings.TrimPrefix(nodePath, "r:0")
+	if remaining == "" {
+		return 0 // 只有 "r:0"，没有任何行动
+	}
+
+	// 移除开头的冒号
+	if strings.HasPrefix(remaining, ":") {
+		remaining = remaining[1:]
+	}
+
+	if remaining == "" {
+		return 0
+	}
+
+	// 按冒号分割行动
+	actions := strings.Split(remaining, ":")
+	betCount := 0
+
+	// 统计主动下注次数
+	for _, action := range actions {
+		action = strings.TrimSpace(action)
+		if action == "" {
+			continue
+		}
+
+		// 检查是否为下注行为：
+		// - 以 'b' 开头的是bet下注
+		// - 以 'r' 开头的是raise加注（也算作主动下注）
+		// - 'c' 是check，不算主动下注
+		// - 'f' 是fold，不算主动下注
+		if strings.HasPrefix(action, "b") || strings.HasPrefix(action, "r") {
+			betCount++
+			log.Printf("检测到主动下注行为: %s，当前bet_level: %d", action, betCount)
+		}
+	}
+
+	log.Printf("节点路径 %s 的bet_level: %d", nodePath, betCount)
+	return betCount
 }
 
 // 修改：计算bet_pct、spr和stack_depth
@@ -1070,16 +1143,9 @@ func calculateBetMetrics(potInfo string, nodeId string, effectiveStack float64) 
 }
 
 // 新增：生成SQL插入语句
-func generateSQLInsert(record *model.Record, nodePrefix string, betLevel int, boardId int64, hand string, betPct float64, spr float64) string {
+func generateSQLInsert(record *model.Record, nodePrefix string, betLevel int, tableName string) string {
 	// 确保至少有一个动作
 	if len(record.Actions) == 0 {
-		return ""
-	}
-
-	// 获取手牌的combo_id
-	comboId, ok := handOrder.Index(record.Hand)
-	if !ok {
-		log.Printf("警告：无法找到手牌 %s 的索引", record.Hand)
 		return ""
 	}
 
@@ -1101,12 +1167,12 @@ func generateSQLInsert(record *model.Record, nodePrefix string, betLevel int, bo
 		action2Eq = action2.Eq
 	}
 
-	// 生成INSERT语句，添加stack_depth字段
-	sql := fmt.Sprintf("INSERT INTO flop_60bb_co_bb (node_prefix, bet_level, board_id, combo_id, stack_depth, bet_pct, spr, "+
-		"action1, freq1, ev1, eq1, action2, freq2, ev2, eq2) VALUES "+
-		"('%s', %d, %d, %d, %.3f, %.3f, %.3f, '%s', %.3f, %.3f, %.3f, '%s', %.3f, %.3f, %.3f);\n",
-		nodePrefix, betLevel, boardId, comboId, record.StackDepth, betPct, spr,
-		action1Label, action1Freq, action1Ev, action1Eq,
+	// 生成INSERT语句，使用动态表名
+	sql := fmt.Sprintf("INSERT IGNORE INTO %s (node_prefix, bet_level, board_id, combo_id, stack_depth, bet_pct, spr, "+
+		"board_str, combo_str, ip_or_oop, action1, freq1, ev1, eq1, action2, freq2, ev2, eq2) VALUES "+
+		"('%s', %d, %d, %d, %.3f, %.4f, %.4f, '%s', '%s', '%s', '%s', %.3f, %.3f, %.3f, '%s', %.3f, %.3f, %.3f);\n",
+		tableName, nodePrefix, betLevel, record.BoardId, record.ComboId, record.StackDepth, record.BetPct, record.Spr,
+		strings.TrimSpace(record.Board), record.Hand, record.IpOrOop, action1Label, action1Freq, action1Ev, action1Eq,
 		action2Label, action2Freq, action2Ev, action2Eq)
 
 	return sql
@@ -1679,4 +1745,628 @@ func waitForCalculationComplete(client *upi.Client) error {
 		// 等待下次检查
 		time.Sleep(checkInterval)
 	}
+}
+
+// 新增：根据node_prefix判断策略执行者（IP或OOP）
+func calculateIpOrOop(nodePrefix string) string {
+	// 示例：r:0:c:20:70:170:370
+	// r:0 是固定前缀，然后 c(oop) -> 20(ip) -> 70(oop) -> 170(ip) -> 370(oop)
+	// 接下来应该是IP执行策略
+
+	// 移除固定前缀 "r:0"
+	if !strings.HasPrefix(nodePrefix, "r:0") {
+		log.Printf("警告：节点格式不符合预期，返回默认值IP: %s", nodePrefix)
+		return "IP"
+	}
+
+	// 去掉 "r:0" 前缀
+	remaining := strings.TrimPrefix(nodePrefix, "r:0")
+	if remaining == "" {
+		// 如果只有 "r:0"，那么第一个行动者是OOP
+		return "OOP"
+	}
+
+	// 移除开头的冒号
+	if strings.HasPrefix(remaining, ":") {
+		remaining = remaining[1:]
+	}
+
+	if remaining == "" {
+		return "OOP"
+	}
+
+	// 按冒号分割剩余部分
+	parts := strings.Split(remaining, ":")
+
+	// 计算行动次数：
+	// 第1次行动：OOP (c)
+	// 第2次行动：IP (20)
+	// 第3次行动：OOP (70)
+	// 第4次行动：IP (170)
+	// 第5次行动：OOP (370)
+	// 第6次行动：IP (下一个策略执行者)
+
+	actionCount := len(parts)
+	log.Printf("节点 %s 解析：去除r:0后=%s，行动次数=%d", nodePrefix, remaining, actionCount)
+
+	// 下一个策略执行者：
+	// 如果已有奇数次行动，下一个是IP
+	// 如果已有偶数次行动，下一个是OOP
+	if actionCount%2 == 1 {
+		return "IP"
+	} else {
+		return "OOP"
+	}
+}
+
+// 新增：从CFR文件名生成表名
+func generateTableName(cfrFileName string) string {
+	// 移除.cfr扩展名
+	baseName := strings.TrimSuffix(cfrFileName, ".cfr")
+
+	// 解析文件名格式: 40bb_COvsBB_8d5c4c
+	// 转换为: flop_40bb_co_bb_8d5c4c (包含公牌信息，用于CSV文件名)
+	parts := strings.Split(baseName, "_")
+	if len(parts) >= 3 {
+		// 提取筹码深度 (如 40bb)
+		stackDepth := parts[0]
+
+		// 提取位置信息 (如 COvsBB)
+		position := parts[1]
+
+		// 提取公牌信息 (如 8d5c4c)
+		board := parts[2]
+
+		// 转换位置信息为小写并格式化
+		// COvsBB -> co_bb
+		positionLower := strings.ToLower(position)
+		positionFormatted := strings.ReplaceAll(positionLower, "vs", "_")
+
+		// 生成表名格式: flop_筹码_位置_公牌 (包含公牌，用于CSV文件名)
+		tableName := fmt.Sprintf("flop_%s_%s_%s", stackDepth, positionFormatted, board)
+
+		log.Printf("生成CSV文件名: %s -> %s", baseName, tableName)
+		return tableName
+	}
+
+	// 如果解析失败，使用默认表名
+	log.Printf("警告：无法解析CFR文件名 %s，使用默认表名", baseName)
+	return "flop_60bb_co_bb"
+}
+
+// 新增：从CFR文件名生成表名（不包含公牌信息）
+func generateTableNameWithoutBoard(cfrFileName string) string {
+	// 移除.cfr扩展名
+	baseName := strings.TrimSuffix(cfrFileName, ".cfr")
+
+	// 解析文件名格式: 40bb_COvsBB_8d5c4c
+	// 转换为: flop_40bb_co_bb (不包含公牌信息)
+	parts := strings.Split(baseName, "_")
+	if len(parts) >= 2 {
+		// 提取筹码深度 (如 40bb)
+		stackDepth := parts[0]
+
+		// 提取位置信息 (如 COvsBB)
+		position := parts[1]
+
+		// 转换位置信息为小写并格式化
+		// COvsBB -> co_bb
+		positionLower := strings.ToLower(position)
+		positionFormatted := strings.ReplaceAll(positionLower, "vs", "_")
+
+		// 生成表名格式: flop_筹码_位置 (不包含公牌)
+		tableName := fmt.Sprintf("flop_%s_%s", stackDepth, positionFormatted)
+
+		log.Printf("生成表名(不含公牌): %s -> %s", baseName, tableName)
+		return tableName
+	}
+
+	// 如果解析失败，使用默认表名
+	log.Printf("警告：无法解析CFR文件名 %s，使用默认表名", baseName)
+	return "flop_60bb_co_bb"
+}
+
+// runMergeCommand 执行SQL文件汇总功能
+func runMergeCommand() {
+	log.Println("==================================")
+	log.Println("【SQL文件汇总功能】正在初始化...")
+	log.Println("==================================")
+
+	// 检查data目录是否存在
+	dataDir := "data"
+	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+		log.Fatalf("data目录不存在: %s", dataDir)
+	}
+
+	// 读取data目录下的所有文件
+	files, err := os.ReadDir(dataDir)
+	if err != nil {
+		log.Fatalf("读取data目录失败: %v", err)
+	}
+
+	// 过滤出SQL文件，排除data.sql
+	var sqlFiles []string
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		fileName := file.Name()
+		if strings.HasSuffix(strings.ToLower(fileName), ".sql") && fileName != "data.sql" {
+			fullPath := filepath.Join(dataDir, fileName)
+			sqlFiles = append(sqlFiles, fullPath)
+		}
+	}
+
+	if len(sqlFiles) == 0 {
+		log.Printf("在data目录中未找到任何SQL文件（除data.sql外）")
+		return
+	}
+
+	// 按文件名排序，确保汇总顺序一致
+	sort.Strings(sqlFiles)
+
+	log.Printf("找到 %d 个SQL文件需要汇总", len(sqlFiles))
+	for i, file := range sqlFiles {
+		log.Printf("  %d. %s", i+1, filepath.Base(file))
+	}
+
+	// 创建输出文件
+	outputPath := filepath.Join(dataDir, "data.sql")
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		log.Fatalf("创建汇总文件失败: %v", err)
+	}
+	defer outputFile.Close()
+
+	// 写入文件头部
+	outputFile.WriteString("-- 汇总的SQL文件\n")
+	outputFile.WriteString(fmt.Sprintf("-- 生成时间: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+	outputFile.WriteString(fmt.Sprintf("-- 汇总了 %d 个SQL文件\n", len(sqlFiles)))
+	outputFile.WriteString("-- ========================================\n\n")
+
+	// 统计变量
+	totalLines := 0
+	totalFiles := 0
+
+	// 逐个读取并合并SQL文件
+	for i, sqlFile := range sqlFiles {
+		log.Printf("\n[%d/%d] 🔄 处理文件: %s", i+1, len(sqlFiles), filepath.Base(sqlFile))
+
+		// 读取文件内容
+		content, err := os.ReadFile(sqlFile)
+		if err != nil {
+			log.Printf("  ❌ 读取文件失败: %v，跳过此文件", err)
+			continue
+		}
+
+		// 统计行数（排除空行和注释行）
+		lines := strings.Split(string(content), "\n")
+		validLines := 0
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "--") {
+				validLines++
+			}
+		}
+
+		// 写入分隔符和文件信息
+		outputFile.WriteString(fmt.Sprintf("-- ========================================\n"))
+		outputFile.WriteString(fmt.Sprintf("-- 来源文件: %s\n", filepath.Base(sqlFile)))
+		outputFile.WriteString(fmt.Sprintf("-- 有效SQL语句: %d 条\n", validLines))
+		outputFile.WriteString(fmt.Sprintf("-- ========================================\n\n"))
+
+		// 写入文件内容
+		_, err = outputFile.Write(content)
+		if err != nil {
+			log.Printf("  ❌ 写入文件内容失败: %v", err)
+			continue
+		}
+
+		// 确保文件末尾有换行符
+		outputFile.WriteString("\n\n")
+
+		totalLines += validLines
+		totalFiles++
+		log.Printf("  ✓ 处理完成，有效SQL语句: %d 条", validLines)
+	}
+
+	// 写入文件尾部统计信息
+	outputFile.WriteString("-- ========================================\n")
+	outputFile.WriteString("-- 汇总统计信息\n")
+	outputFile.WriteString(fmt.Sprintf("-- 处理文件数: %d\n", totalFiles))
+	outputFile.WriteString(fmt.Sprintf("-- 总SQL语句数: %d\n", totalLines))
+	outputFile.WriteString(fmt.Sprintf("-- 汇总完成时间: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+	outputFile.WriteString("-- ========================================\n")
+
+	log.Println("\n==================================")
+	log.Println("【SQL文件汇总功能】完成！")
+	log.Printf("📊 汇总统计:")
+	log.Printf("   处理文件数: %d", totalFiles)
+	log.Printf("   总SQL语句数: %d", totalLines)
+	log.Printf("   输出文件: %s", outputPath)
+	log.Println("==================================")
+}
+
+// runMergeCSVCommand 执行SQL转CSV功能
+func runMergeCSVCommand() {
+	log.Println("==================================")
+	log.Println("【SQL转CSV功能】正在初始化...")
+	log.Println("==================================")
+
+	// 检查data目录是否存在
+	dataDir := "data"
+	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+		log.Fatalf("data目录不存在: %s", dataDir)
+	}
+
+	// 读取data目录下的所有文件
+	files, err := os.ReadDir(dataDir)
+	if err != nil {
+		log.Fatalf("读取data目录失败: %v", err)
+	}
+
+	// 过滤出SQL文件，排除data.sql
+	var sqlFiles []string
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		fileName := file.Name()
+		if strings.HasSuffix(strings.ToLower(fileName), ".sql") && fileName != "data.sql" {
+			fullPath := filepath.Join(dataDir, fileName)
+			sqlFiles = append(sqlFiles, fullPath)
+		}
+	}
+
+	if len(sqlFiles) == 0 {
+		log.Println("没有找到需要转换的SQL文件")
+		return
+	}
+
+	log.Printf("找到 %d 个SQL文件需要转换", len(sqlFiles))
+
+	// 创建csv目录
+	csvDir := "csv"
+	if err := os.MkdirAll(csvDir, 0755); err != nil {
+		log.Fatalf("创建csv目录失败: %v", err)
+	}
+
+	// 统计信息
+	var totalFiles int
+	var totalRecords int
+	var csvToTableMap = make(map[string]string) // CSV文件名 -> 表名的映射
+
+	// 为每个SQL文件生成独立的CSV文件
+	for _, sqlFile := range sqlFiles {
+		log.Printf("正在处理SQL文件: %s", filepath.Base(sqlFile))
+
+		// 从SQL文件名推导CFR文件名
+		sqlFileName := filepath.Base(sqlFile)
+		cfrFileName := strings.TrimSuffix(sqlFileName, ".sql") + ".cfr"
+
+		// 生成完整的CSV文件名（包含公牌）
+		csvBaseName := generateTableName(cfrFileName) // 包含公牌的完整名称
+		csvFileName := csvBaseName + ".csv"
+		csvFilePath := filepath.Join(csvDir, csvFileName)
+
+		// 生成表名（不包含公牌）
+		tableName := generateTableNameWithoutBoard(cfrFileName)
+
+		// 记录CSV文件到表名的映射
+		csvToTableMap[csvFileName] = tableName
+
+		// 转换单个SQL文件为CSV
+		recordCount, err := convertSQLToCSV(sqlFile, csvFilePath, tableName)
+		if err != nil {
+			log.Printf("转换SQL文件 %s 失败: %v", sqlFile, err)
+			continue
+		}
+
+		totalFiles++
+		totalRecords += recordCount
+		log.Printf("已生成CSV文件: %s -> 表: %s (记录数: %d)", csvFileName, tableName, recordCount)
+	}
+
+	// 生成LOAD DATA脚本
+	if err := generateLoadDataScriptWithMapping(csvDir, csvToTableMap); err != nil {
+		log.Printf("生成LOAD DATA脚本失败: %v", err)
+	}
+
+	log.Println("\n==================================")
+	log.Printf("【SQL转CSV完成】")
+	log.Printf("总CSV文件数: %d", totalFiles)
+	log.Printf("总记录数: %d", totalRecords)
+	log.Printf("CSV文件保存在: %s", csvDir)
+	log.Printf("LOAD DATA脚本: %s/load_data.sql", csvDir)
+	log.Println("==================================")
+}
+
+// parseSQLFile 解析SQL文件，提取表名和数据记录
+func parseSQLFile(content string) (string, [][]string, error) {
+	lines := strings.Split(content, "\n")
+	var records [][]string
+	var tableName string
+
+	// 正则表达式匹配INSERT语句
+	insertRegex := regexp.MustCompile(`INSERT\s+(?:IGNORE\s+)?INTO\s+(\w+)\s+\([^)]+\)\s+VALUES\s+\(([^)]+)\);?`)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") {
+			continue
+		}
+
+		// 匹配INSERT语句
+		matches := insertRegex.FindStringSubmatch(line)
+		if len(matches) >= 3 {
+			// 提取表名（第一次遇到时）
+			if tableName == "" {
+				tableName = matches[1]
+			}
+
+			// 提取VALUES部分
+			valuesStr := matches[2]
+
+			// 解析VALUES中的字段值
+			values, err := parseValues(valuesStr)
+			if err != nil {
+				log.Printf("警告：解析VALUES失败: %v，跳过此行", err)
+				continue
+			}
+
+			records = append(records, values)
+		}
+	}
+
+	if tableName == "" {
+		return "", nil, fmt.Errorf("未找到有效的表名")
+	}
+
+	return tableName, records, nil
+}
+
+// parseValues 解析SQL VALUES子句中的值
+func parseValues(valuesStr string) ([]string, error) {
+	var values []string
+	var current strings.Builder
+	inQuotes := false
+	escaped := false
+
+	for _, char := range valuesStr {
+		switch char {
+		case '\'':
+			if escaped {
+				current.WriteRune(char)
+				escaped = false
+			} else {
+				inQuotes = !inQuotes
+				// 不将引号写入值中
+			}
+		case '\\':
+			if inQuotes && !escaped {
+				escaped = true
+				// 不写入转义字符本身，等待下一个字符
+			} else {
+				current.WriteRune(char)
+				escaped = false
+			}
+		case ',':
+			if !inQuotes {
+				// 字段分隔符
+				value := strings.TrimSpace(current.String())
+				values = append(values, value)
+				current.Reset()
+			} else {
+				current.WriteRune(char)
+			}
+			escaped = false
+		case ' ', '\t':
+			if inQuotes {
+				current.WriteRune(char)
+			} else if current.Len() > 0 {
+				// 只有在值不为空时才添加空格
+				current.WriteRune(char)
+			}
+			escaped = false
+		default:
+			current.WriteRune(char)
+			escaped = false
+		}
+	}
+
+	// 添加最后一个值
+	if current.Len() > 0 {
+		value := strings.TrimSpace(current.String())
+		values = append(values, value)
+	}
+
+	return values, nil
+}
+
+// writeCSVFile 写入CSV文件
+func writeCSVFile(filePath string, records [][]string) error {
+	file, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("创建CSV文件失败: %v", err)
+	}
+	defer file.Close()
+
+	// 写入CSV头部（字段名）
+	header := []string{
+		"node_prefix", "bet_level", "board_id", "combo_id", "stack_depth", "bet_pct", "spr",
+		"board_str", "combo_str", "ip_or_oop", "action1", "freq1", "ev1", "eq1",
+		"action2", "freq2", "ev2", "eq2",
+	}
+
+	// 写入头部行
+	headerLine := "\"" + strings.Join(header, "\",\"") + "\"\n"
+	_, err = file.WriteString(headerLine)
+	if err != nil {
+		return fmt.Errorf("写入CSV头部失败: %v", err)
+	}
+
+	// 写入数据行
+	for _, record := range records {
+		// 确保记录有足够的字段
+		if len(record) < len(header) {
+			// 补齐缺失的字段
+			for len(record) < len(header) {
+				record = append(record, "")
+			}
+		}
+
+		// 对每个字段进行CSV转义
+		var escapedRecord []string
+		for _, field := range record {
+			// 移除字段两端的引号（如果有的话）
+			field = strings.Trim(field, "'\"")
+			// 转义CSV中的双引号
+			field = strings.ReplaceAll(field, "\"", "\"\"")
+			escapedRecord = append(escapedRecord, field)
+		}
+
+		// 写入数据行
+		dataLine := "\"" + strings.Join(escapedRecord, "\",\"") + "\"\n"
+		_, err = file.WriteString(dataLine)
+		if err != nil {
+			return fmt.Errorf("写入CSV数据失败: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// generateLoadDataScript 生成LOAD DATA脚本
+func generateLoadDataScript(csvDir string, tableNames []string) error {
+	scriptPath := filepath.Join(csvDir, "load_data.sql")
+	file, err := os.Create(scriptPath)
+	if err != nil {
+		return fmt.Errorf("创建脚本文件失败: %v", err)
+	}
+	defer file.Close()
+
+	// 写入脚本头部
+	file.WriteString("-- ========================================\n")
+	file.WriteString("-- PioSolver数据导入脚本\n")
+	file.WriteString("-- 自动生成时间: " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	file.WriteString("-- ========================================\n\n")
+
+	// 为每个表生成LOAD DATA语句
+	for _, tableName := range tableNames {
+		csvFileName := fmt.Sprintf("%s.csv", tableName)
+
+		file.WriteString(fmt.Sprintf("-- 导入表: %s\n", tableName))
+		file.WriteString(fmt.Sprintf("LOAD DATA LOCAL INFILE '%s/%s'\n", csvDir, csvFileName))
+		file.WriteString(fmt.Sprintf("INTO TABLE %s\n", tableName))
+		file.WriteString("FIELDS TERMINATED BY ',' ENCLOSED BY '\"'\n")
+		file.WriteString("LINES TERMINATED BY '\\n'\n")
+		file.WriteString("(node_prefix, bet_level, board_id, combo_id, stack_depth, bet_pct, spr, board_str, combo_str, ip_or_oop,\n")
+		file.WriteString(" action1, freq1, ev1, eq1,\n")
+		file.WriteString(" action2, freq2, ev2, eq2);\n\n")
+	}
+
+	// 写入脚本尾部
+	file.WriteString("-- ========================================\n")
+	file.WriteString("-- 导入完成\n")
+	file.WriteString(fmt.Sprintf("-- 总表数: %d\n", len(tableNames)))
+	file.WriteString("-- ========================================\n")
+
+	return nil
+}
+
+// convertSQLToCSV 将单个SQL文件转换为CSV文件
+func convertSQLToCSV(sqlFilePath, csvFilePath, tableName string) (int, error) {
+	// 读取SQL文件内容
+	content, err := os.ReadFile(sqlFilePath)
+	if err != nil {
+		return 0, fmt.Errorf("读取SQL文件失败: %v", err)
+	}
+
+	// 解析SQL文件，提取数据
+	_, records, err := parseSQLFile(string(content))
+	if err != nil {
+		return 0, fmt.Errorf("解析SQL文件失败: %v", err)
+	}
+
+	if len(records) == 0 {
+		return 0, fmt.Errorf("文件中没有有效的INSERT语句")
+	}
+
+	// 写入CSV文件
+	err = writeCSVFile(csvFilePath, records)
+	if err != nil {
+		return 0, fmt.Errorf("写入CSV文件失败: %v", err)
+	}
+
+	return len(records), nil
+}
+
+// generateLoadDataScriptWithMapping 生成LOAD DATA脚本，支持CSV文件名到表名的映射
+func generateLoadDataScriptWithMapping(csvDir string, csvToTableMap map[string]string) error {
+	scriptPath := filepath.Join(csvDir, "load_data.sql")
+	file, err := os.Create(scriptPath)
+	if err != nil {
+		return fmt.Errorf("创建脚本文件失败: %v", err)
+	}
+	defer file.Close()
+
+	// 获取当前工作目录的绝对路径
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("获取当前目录失败: %v", err)
+	}
+
+	// 构建CSV目录的绝对路径
+	csvAbsPath := filepath.Join(currentDir, csvDir)
+	// 将Windows路径分隔符转换为正斜杠（MySQL兼容）
+	csvAbsPath = strings.ReplaceAll(csvAbsPath, "\\", "/")
+
+	// 写入脚本头部
+	file.WriteString("-- ========================================\n")
+	file.WriteString("-- PioSolver数据导入脚本\n")
+	file.WriteString("-- 自动生成时间: " + time.Now().Format("2006-01-02 15:04:05") + "\n")
+	file.WriteString("-- 支持IGNORE功能，避免重复数据冲突\n")
+	file.WriteString(fmt.Sprintf("-- CSV文件路径: %s\n", csvAbsPath))
+	file.WriteString("-- ========================================\n\n")
+
+	// 按表名分组CSV文件
+	tableToCSVs := make(map[string][]string)
+	for csvFile, tableName := range csvToTableMap {
+		tableToCSVs[tableName] = append(tableToCSVs[tableName], csvFile)
+	}
+
+	// 为每个表生成LOAD DATA语句
+	for tableName, csvFiles := range tableToCSVs {
+		file.WriteString(fmt.Sprintf("-- ========================================\n"))
+		file.WriteString(fmt.Sprintf("-- 导入表: %s (共 %d 个CSV文件)\n", tableName, len(csvFiles)))
+		file.WriteString(fmt.Sprintf("-- ========================================\n\n"))
+
+		// 为每个CSV文件生成LOAD DATA语句
+		for _, csvFileName := range csvFiles {
+			// 构建完整的绝对路径
+			csvFullPath := fmt.Sprintf("%s/%s", csvAbsPath, csvFileName)
+
+			file.WriteString(fmt.Sprintf("-- 导入文件: %s\n", csvFileName))
+			file.WriteString(fmt.Sprintf("LOAD DATA LOCAL INFILE '%s'\n", csvFullPath))
+			file.WriteString(fmt.Sprintf("IGNORE INTO TABLE %s\n", tableName)) // 添加IGNORE关键字
+			file.WriteString("FIELDS TERMINATED BY ',' ENCLOSED BY '\"'\n")
+			file.WriteString("LINES TERMINATED BY '\\n'\n")
+			file.WriteString("IGNORE 1 LINES\n") // 忽略CSV头部行
+			file.WriteString("(node_prefix, bet_level, board_id, combo_id, stack_depth, bet_pct, spr, board_str, combo_str, ip_or_oop,\n")
+			file.WriteString(" action1, freq1, ev1, eq1,\n")
+			file.WriteString(" action2, freq2, ev2, eq2);\n\n")
+		}
+	}
+
+	// 写入脚本尾部
+	file.WriteString("-- ========================================\n")
+	file.WriteString("-- 导入完成\n")
+	file.WriteString(fmt.Sprintf("-- 总表数: %d\n", len(tableToCSVs)))
+	file.WriteString(fmt.Sprintf("-- 总CSV文件数: %d\n", len(csvToTableMap)))
+	file.WriteString(fmt.Sprintf("-- CSV文件绝对路径: %s\n", csvAbsPath))
+	file.WriteString("-- ========================================\n")
+
+	return nil
 }
